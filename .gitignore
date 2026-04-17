@@ -1,0 +1,24 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments (uv default)
+.venv
+venv/
+
+# Environment variables & Configuration
+.env
+config.json
+
+# Application State & Logs
+seen_ids.json
+scheduled.json
+monitor.log
+
+# Cookies (Critical security risk)
+*cookies.txt
+*cookies.txt.*.tmp
