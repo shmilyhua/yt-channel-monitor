@@ -58,15 +58,30 @@ An asynchronous Python monitor that tracks YouTube and Twitch channels for speci
     
     "CHANNELS": [
         {
-            "name": "Target Main Channel",
-            "url": "[https://www.youtube.com/@TargetMainChannel](https://www.youtube.com/@TargetMainChannel)",
+            "name": "神楽めあ / KaguraMea",
+            "url": "https://www.youtube.com/@KaguraMea",
             "monitor": ["live", "streams", "videos", "shorts"]
         },
         {
-            "name": "Target Collab Channel",
-            "url": "[https://www.youtube.com/@TargetCollabChannel](https://www.youtube.com/@TargetCollabChannel)",
-            "monitor": ["live", "streams", "videos"],
-            "keywords": ["Keyword1", "Keyword2"] 
+            "name": "さぶめあちゃんねるっ!",
+            "url": "https://www.youtube.com/@KaguraMeaNyan",
+            "monitor": ["videos"]
+        },
+        {
+            "name": "汚い方の神楽めあ【公式】",
+            "url": "https://www.youtube.com/@めあ汚い",
+            "monitor": ["videos", "shorts"]
+        },
+        {
+            "name": "神楽めあ",
+            "url": "https://www.twitch.tv/kagura0mea",
+            "monitor": ["live", "streams"]
+        },
+        {
+            "name": "Tamaki Ch. 犬山たまき / 佃煮のりお",
+            "url": "https://www.youtube.com/@犬山たまき佃煮のりお",
+            "monitor": ["live", "streams", "videos", "shorts"],
+            "keywords": ["神楽めあ", "KaguraMea"]
         }
     ]
 }
@@ -87,12 +102,12 @@ To monitor a Twitch channel, use the standard Twitch URL format. The application
 {
     "name": "Twitch Streamer Name",
     "url": "[https://www.twitch.tv/username](https://www.twitch.tv/username)",
-    "monitor": ["live", "streams", "videos"]
+    "monitor": ["live", "streams"]
 }
 ```
 
-* **live / streams:** Monitors the channel for active live broadcasts.
-* **videos:** Monitors the channel's VOD archives.
+* **live:** Monitors the channel for active live broadcasts.
+* **streams:** Monitors the channel's VOD archives.
 * **Note:** Twitch channels do not support the `shorts` tab. Including it in the `monitor` array for a Twitch channel will be safely ignored by the script to save network requests.
 
 ## Usage
