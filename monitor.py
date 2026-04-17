@@ -190,7 +190,19 @@ async def send_telegram_notification(data, prefix, channel_name):
 
 async def fetch_latest_items(target_url, master_cookies_file, m_type=''):
     items_range = '1-3' if m_type == 'streams' else ('1' if m_type in ['live', 'targeted'] else '1-2')
-    cmd = ['yt-dlp', '--cookies', master_cookies_file, '-j', '--no-warnings', '--playlist-items', items_range, '--ignore-no-formats-error', target_url]
+    
+    cmd = [
+        'yt-dlp', 
+        '-j', 
+        '--no-warnings', 
+        '--playlist-items', items_range, 
+        '--ignore-no-formats-error'
+    ]
+    
+    if master_cookies_file and os.path.exists(master_cookies_file):
+        cmd.extend(['--cookies', master_cookies_file])
+        
+    cmd.append(target_url)
     
     items = []
     try:
