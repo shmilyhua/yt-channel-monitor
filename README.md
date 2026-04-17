@@ -1,3 +1,7 @@
+[![AI Generated](https://img.shields.io/badge/AI_Generated-Gemini-blue.svg)](https://gemini.google.com)
+## Acknowledgments
+
+* **Code Generation:** The core logic and boilerplate for this project were generated using Gemini. All AI-generated code was subsequently reviewed and tested.
 # yt-channel-monitor
 
 An asynchronous Python monitor that tracks YouTube and Twitch channels for specific keywords, live streams, premieres, and VOD uploads. It uses `yt-dlp` for YouTube data extraction and the official Twitch API for Twitch streams, sending real-time formatting alerts to a designated Telegram chat.
@@ -24,12 +28,13 @@ An asynchronous Python monitor that tracks YouTube and Twitch channels for speci
 
 1. Clone the repository:
    ```bash
-   git clone [https://github.com/yourusername/yt-channel-monitor.git](https://github.com/yourusername/yt-channel-monitor.git)
+   git clone https://github.com/shmilyhua/yt-channel-monitor.git
    cd yt-channel-monitor
    ```
 
 2. This project uses `uv` for dependency management. Install the dependencies:
    ```bash
+   uv venv --python 3.13
    uv sync
    ```
    *(Alternatively, you can install the dependencies listed in `pyproject.toml` via pip).*
@@ -74,16 +79,28 @@ The presence or absence of the `keywords` key dictates how a channel is processe
 * **Main Channels (No `keywords`):** Channels configured without the `keywords` array are routed to the **Main Queue**. The script will trigger alerts for *every* new stream or upload found on these channels. The polling frequency is governed by `MAIN_SCAN_INTERVAL`.
 * **Collab Channels (Has `keywords`):** Channels configured with the `keywords` array are routed to the **Collab Queue**. The script will only trigger alerts if the stream/video title or description matches one of the provided keywords. The polling frequency is governed by `COLLAB_SCAN_INTERVAL`.
 
+### Twitch Channel Configuration
+
+To monitor a Twitch channel, use the standard Twitch URL format. The application automatically detects `twitch.tv` in the URL and routes requests appropriately. 
+
+```json
+{
+    "name": "Twitch Streamer Name",
+    "url": "[https://www.twitch.tv/username](https://www.twitch.tv/username)",
+    "monitor": ["live", "streams", "videos"]
+}
+```
+
+* **live / streams:** Monitors the channel for active live broadcasts.
+* **videos:** Monitors the channel's VOD archives.
+* **Note:** Twitch channels do not support the `shorts` tab. Including it in the `monitor` array for a Twitch channel will be safely ignored by the script to save network requests.
+
 ## Usage
 
 Start the monitor by running:
 
 ```bash
-python monitor.py
+uv run monitor.py
 ```
 
 The application will generate `seen_ids.json`, `scheduled.json`, and `monitor.log` locally to track execution state and logging output.
-
-## License
-
-[MIT](LICENSE)
