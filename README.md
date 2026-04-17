@@ -5,9 +5,11 @@ An asynchronous Python monitor that tracks YouTube and Twitch channels for speci
 ## Features
 
 * **Multi-Platform:** Monitors both YouTube and Twitch.
-* **Asynchronous Processing:** Utilizes `asyncio` to run independent, non-blocking polling queues (Fast block for scheduled streams, Main queue, and Collab queue).
+* **Asynchronous Processing:** Utilizes `asyncio` to run independent, non-blocking polling queues:
+  * **Fast Block:** High-frequency polling for scheduled streams nearing their start time.
+  * **Main Queue:** Scans primary channels for all uploads and streams.
+  * **Collab Queue:** Scans secondary channels, filtering strictly for specific keywords.
 * **State Management:** Tracks video IDs locally (`seen_ids.json` and `scheduled.json`) to prevent duplicate notifications.
-* **Keyword Filtering:** Only triggers notifications if stream titles or descriptions contain specified keywords (e.g., tracking specific VTuber collaborations across multiple channels).
 * **Telegram Integration:** Sends formatted messages with video thumbnails, channel names, timestamps, and direct URLs.
 
 ## Requirements
@@ -51,15 +53,26 @@ An asynchronous Python monitor that tracks YouTube and Twitch channels for speci
     
     "CHANNELS": [
         {
-            "name": "Target Channel Name",
-            "url": "[https://www.youtube.com/@TargetChannel](https://www.youtube.com/@TargetChannel)",
-            "monitor": ["live", "streams", "videos", "shorts"],
+            "name": "Target Main Channel",
+            "url": "[https://www.youtube.com/@TargetMainChannel](https://www.youtube.com/@TargetMainChannel)",
+            "monitor": ["live", "streams", "videos", "shorts"]
+        },
+        {
+            "name": "Target Collab Channel",
+            "url": "[https://www.youtube.com/@TargetCollabChannel](https://www.youtube.com/@TargetCollabChannel)",
+            "monitor": ["live", "streams", "videos"],
             "keywords": ["Keyword1", "Keyword2"] 
         }
     ]
 }
 ```
-*Note: Omit the `keywords` array if you want to track all uploads/streams from a channel.*
+
+### Channel Routing & Keywords Logic
+
+The presence or absence of the `keywords` key dictates how a channel is processed:
+
+* **Main Channels (No `keywords`):** Channels configured without the `keywords` array are routed to the **Main Queue**. The script will trigger alerts for *every* new stream or upload found on these channels. The polling frequency is governed by `MAIN_SCAN_INTERVAL`.
+* **Collab Channels (Has `keywords`):** Channels configured with the `keywords` array are routed to the **Collab Queue**. The script will only trigger alerts if the stream/video title or description matches one of the provided keywords. The polling frequency is governed by `COLLAB_SCAN_INTERVAL`.
 
 ## Usage
 
