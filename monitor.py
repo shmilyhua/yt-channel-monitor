@@ -4,10 +4,8 @@ import json
 import os
 import requests
 import html
-import shutil
 import logging
 import re
-import uuid
 from datetime import datetime
 
 LOG_FILE = 'monitor.log'
@@ -29,10 +27,11 @@ logging.basicConfig(
     ]
 )
 
-# --- LOCKS FOR CONCURRENT WRITES ---
+# --- LOCKS FOR CONCURRENT OPERATIONS ---
 state_lock = asyncio.Lock()
 scheduled_lock = asyncio.Lock()
 telegram_lock = asyncio.Lock()
+twitch_auth_lock = asyncio.Lock()
 
 def load_json(filepath, default):
     if not os.path.exists(filepath):
@@ -63,35 +62,40 @@ seen_ids = dict.fromkeys(load_json(STATE_FILE, []))
 # --- ASYNC HELPER FUNCTIONS ---
 async def save_state():
     async with state_lock:
-        keys = list(seen_ids.keys())
-        capped_state = keys[-MAX_HISTORY:] if len(keys) > MAX_HISTORY else keys
-        await asyncio.to_thread(save_json, STATE_FILE, capped_state)
+        while len(seen_ids) > MAX_HISTORY:
+            seen_ids.pop(next(iter(seen_ids)))
+        await asyncio.to_thread(save_json, STATE_FILE, list(seen_ids.keys()))
 
-def get_twitch_stream_info_sync(username):
+async def ensure_twitch_token():
     global twitch_access_token, twitch_token_expiry
-    current_time = time.time()
-    
     if not TWITCH_CLIENT_ID or not TWITCH_CLIENT_SECRET:
+        return False
+
+    if not twitch_access_token or time.time() >= twitch_token_expiry:
+        async with twitch_auth_lock:
+            if not twitch_access_token or time.time() >= twitch_token_expiry:
+                auth_url = "https://id.twitch.tv/oauth2/token"
+                payload = {
+                    'client_id': TWITCH_CLIENT_ID,
+                    'client_secret': TWITCH_CLIENT_SECRET,
+                    'grant_type': 'client_credentials'
+                }
+                try:
+                    auth_res = await asyncio.to_thread(requests.post, auth_url, data=payload, timeout=10)
+                    auth_data = auth_res.json()
+                    twitch_access_token = auth_data.get('access_token')
+                    if not twitch_access_token:
+                        return False
+                    twitch_token_expiry = time.time() + auth_data.get('expires_in', 0) - 60
+                except Exception as e:
+                    logging.error(f"Twitch Auth Error: {e}")
+                    return False
+    return True
+
+def get_twitch_stream_info_sync(username, token):
+    if not token:
         return "", ""
-
-    if not twitch_access_token or current_time >= twitch_token_expiry:
-        auth_url = "https://id.twitch.tv/oauth2/token"
-        payload = {
-            'client_id': TWITCH_CLIENT_ID,
-            'client_secret': TWITCH_CLIENT_SECRET,
-            'grant_type': 'client_credentials'
-        }
-        try:
-            auth_res = requests.post(auth_url, data=payload, timeout=10).json()
-            twitch_access_token = auth_res.get('access_token')
-            if not twitch_access_token:
-                return "", ""
-            twitch_token_expiry = current_time + auth_res.get('expires_in', 0) - 60
-        except Exception as e:
-            logging.error(f"Twitch Auth Error: {e}")
-            return "", ""
-
-    headers = {'Client-ID': TWITCH_CLIENT_ID, 'Authorization': f"Bearer {twitch_access_token}"}
+    headers = {'Client-ID': TWITCH_CLIENT_ID, 'Authorization': f"Bearer {token}"}
     try:
         stream_url = f"https://api.twitch.tv/helix/streams?user_login={username}"
         stream_res = requests.get(stream_url, headers=headers, timeout=10).json()
@@ -103,7 +107,9 @@ def get_twitch_stream_info_sync(username):
     return "", ""
 
 async def get_twitch_stream_info(username):
-    return await asyncio.to_thread(get_twitch_stream_info_sync, username)
+    if await ensure_twitch_token():
+        return await asyncio.to_thread(get_twitch_stream_info_sync, username, twitch_access_token)
+    return "", ""
 
 def send_telegram_sync(payload):
     api_url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendPhoto"
@@ -179,14 +185,8 @@ async def send_telegram_notification(data, prefix, channel_name):
         await asyncio.sleep(1.5)
 
 async def fetch_latest_items(target_url, master_cookies_file, m_type=''):
-    temp_cookies = f"{master_cookies_file}.{uuid.uuid4().hex}.tmp"
-    if os.path.exists(master_cookies_file):
-        await asyncio.to_thread(shutil.copy2, master_cookies_file, temp_cookies)
-    else:
-        temp_cookies = master_cookies_file
-        
     items_range = '1-3' if m_type == 'streams' else ('1' if m_type in ['live', 'targeted'] else '1-2')
-    cmd = ['yt-dlp', '--cookies', temp_cookies, '-j', '--no-warnings', '--playlist-items', items_range, '--ignore-no-formats-error', target_url]
+    cmd = ['yt-dlp', '--cookies', master_cookies_file, '-j', '--no-warnings', '--playlist-items', items_range, '--ignore-no-formats-error', target_url]
     
     items = []
     try:
@@ -208,9 +208,6 @@ async def fetch_latest_items(target_url, master_cookies_file, m_type=''):
         logging.warning(f"Timeout fetching data for {target_url}")
     except Exception as e:
         logging.error(f"Async execution error for {target_url}: {e}")
-    finally:
-        if temp_cookies != master_cookies_file and os.path.exists(temp_cookies):
-            await asyncio.to_thread(os.remove, temp_cookies)
             
     return items
 
