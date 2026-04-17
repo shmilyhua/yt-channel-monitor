@@ -56,8 +56,9 @@ FREE_CHAT_ID = config.get('FREE_CHAT_ID', '')
 twitch_access_token = None
 twitch_token_expiry = 0
 
-# Using dict keys to preserve insertion order for state truncation
+# In-memory state tracking to prevent disk thrashing
 seen_ids = dict.fromkeys(load_json(STATE_FILE, []))
+scheduled_streams = load_json(SCHEDULED_FILE, [])
 
 # --- ASYNC HELPER FUNCTIONS ---
 async def save_state():
@@ -205,6 +206,7 @@ async def fetch_latest_items(target_url, master_cookies_file, m_type=''):
                 logging.error(f"CRITICAL: Cookie expired for {target_url}.")
     except asyncio.TimeoutError:
         process.kill()
+        await process.wait()
         logging.warning(f"Timeout fetching data for {target_url}")
     except Exception as e:
         logging.error(f"Async execution error for {target_url}: {e}")
@@ -218,6 +220,7 @@ def check_keywords(text, keywords):
 
 # --- CORE PROCESSING LOGIC ---
 async def process_channel(channel, allowed_tab, cookies_file):
+    global scheduled_streams
     state_modified = False
     channel_name = channel.get('name', 'Unknown Channel')
     base_url = channel.get('url')
@@ -261,9 +264,8 @@ async def process_channel(channel, allowed_tab, cookies_file):
                     fallback = time.time() + 31536000
                     
                     async with scheduled_lock:
-                        sched_list = await asyncio.to_thread(load_json, SCHEDULED_FILE, [])
-                        if not any(s['id'] == v_id for s in sched_list):
-                            sched_list.append({
+                        if not any(s['id'] == v_id for s in scheduled_streams):
+                            scheduled_streams.append({
                                 'id': v_id,
                                 'url': item.get('webpage_url', f"https://www.youtube.com/watch?v={v_id}"),
                                 'timestamp': float(raw_sched) if raw_sched else fallback,
@@ -272,7 +274,7 @@ async def process_channel(channel, allowed_tab, cookies_file):
                                 'is_twitch': is_twitch,
                                 'is_premiere': allowed_tab == 'videos'
                             })
-                            await asyncio.to_thread(save_json, SCHEDULED_FILE, sched_list)
+                            await asyncio.to_thread(save_json, SCHEDULED_FILE, scheduled_streams)
             
             # 2. LIVE STATUS
             elif live_status == 'is_live':
@@ -292,11 +294,10 @@ async def process_channel(channel, allowed_tab, cookies_file):
                     state_modified = True
                     
                     async with scheduled_lock:
-                        sched_list = await asyncio.to_thread(load_json, SCHEDULED_FILE, [])
-                        original_len = len(sched_list)
-                        sched_list = [s for s in sched_list if s['id'] != v_id]
-                        if len(sched_list) < original_len:
-                            await asyncio.to_thread(save_json, SCHEDULED_FILE, sched_list)
+                        original_len = len(scheduled_streams)
+                        scheduled_streams = [s for s in scheduled_streams if s['id'] != v_id]
+                        if len(scheduled_streams) < original_len:
+                            await asyncio.to_thread(save_json, SCHEDULED_FILE, scheduled_streams)
                     
             # 3. PAST / VOD / STANDARD UPLOADS
             else:
@@ -329,12 +330,12 @@ async def process_channel(channel, allowed_tab, cookies_file):
 
 # --- ASYNC WORKERS ---
 async def fast_block_worker(channels, cookies_file, interval):
+    global scheduled_streams
     yt_main = [c for c in channels if not c.get('keywords')]
     
     while True:
         try:
             async with scheduled_lock:
-                scheduled_streams = await asyncio.to_thread(load_json, SCHEDULED_FILE, [])
                 updated_queue = []
                 queue_modified = False
                 current_time = time.time()
@@ -379,7 +380,8 @@ async def fast_block_worker(channels, cookies_file, interval):
                     updated_queue.append(stream)
 
                 if queue_modified:
-                    await asyncio.to_thread(save_json, SCHEDULED_FILE, updated_queue)
+                    scheduled_streams = updated_queue
+                    await asyncio.to_thread(save_json, SCHEDULED_FILE, scheduled_streams)
 
             tasks = []
             for c in yt_main:
@@ -412,7 +414,10 @@ async def rolling_queue_worker(queue_name, channels, tabs, interval, cookies_fil
         target_channel, current_tab = execution_queue[queue_idx]
         
         logging.info(f"{queue_name} Scan ({current_tab}): '{target_channel.get('name')}'")
-        await process_channel(target_channel, current_tab, cookies_file)
+        try:
+            await process_channel(target_channel, current_tab, cookies_file)
+        except Exception as e:
+            logging.error(f"{queue_name} Task Error for '{target_channel.get('name')}' on tab '{current_tab}': {e}")
         
         queue_idx = (queue_idx + 1) % len(execution_queue)
         await asyncio.sleep(interval)
