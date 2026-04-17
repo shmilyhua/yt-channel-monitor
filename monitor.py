@@ -65,7 +65,9 @@ async def save_state():
     async with state_lock:
         while len(seen_ids) > MAX_HISTORY:
             seen_ids.pop(next(iter(seen_ids)))
-        await asyncio.to_thread(save_json, STATE_FILE, list(seen_ids.keys()))
+        keys_to_save = list(seen_ids.keys())
+        
+    await asyncio.to_thread(save_json, STATE_FILE, keys_to_save)
 
 async def ensure_twitch_token():
     global twitch_access_token, twitch_token_expiry
@@ -268,6 +270,9 @@ async def process_channel(channel, allowed_tab, cookies_file):
                 raw_sched = item.get('scheduled_timestamp') or item.get('release_timestamp')
                 fallback = time.time() + 31536000
                 
+                needs_schedule_save = False
+                schedule_to_save = []
+                
                 async with scheduled_lock:
                     if not any(s['id'] == v_id for s in scheduled_streams):
                         scheduled_streams.append({
@@ -279,7 +284,11 @@ async def process_channel(channel, allowed_tab, cookies_file):
                             'is_twitch': is_twitch,
                             'is_premiere': allowed_tab == 'videos'
                         })
-                        await asyncio.to_thread(save_json, SCHEDULED_FILE, scheduled_streams)
+                        schedule_to_save = list(scheduled_streams)
+                        needs_schedule_save = True
+                        
+                if needs_schedule_save:
+                    await asyncio.to_thread(save_json, SCHEDULED_FILE, schedule_to_save)
         
         # 2. LIVE STATUS
         elif live_status == 'is_live':
@@ -303,11 +312,18 @@ async def process_channel(channel, allowed_tab, cookies_file):
                     
                 await send_telegram_notification(item, prefix, channel_name)
                 
+                needs_schedule_save = False
+                schedule_to_save = []
+                
                 async with scheduled_lock:
                     original_len = len(scheduled_streams)
                     scheduled_streams = [s for s in scheduled_streams if s['id'] != v_id]
                     if len(scheduled_streams) < original_len:
-                        await asyncio.to_thread(save_json, SCHEDULED_FILE, scheduled_streams)
+                        schedule_to_save = list(scheduled_streams)
+                        needs_schedule_save = True
+                        
+                if needs_schedule_save:
+                    await asyncio.to_thread(save_json, SCHEDULED_FILE, schedule_to_save)
                 
         # 3. PAST / VOD / STANDARD UPLOADS
         else:
@@ -351,9 +367,11 @@ async def fast_block_worker(channels, cookies_file, interval):
     
     while True:
         try:
+            queue_modified = False
+            schedule_to_save = []
+            
             async with scheduled_lock:
                 updated_queue = []
-                queue_modified = False
                 current_time = time.time()
 
                 for stream in sorted(scheduled_streams, key=lambda x: x.get('timestamp', 0)):
@@ -401,7 +419,10 @@ async def fast_block_worker(channels, cookies_file, interval):
 
                 if queue_modified:
                     scheduled_streams = updated_queue
-                    await asyncio.to_thread(save_json, SCHEDULED_FILE, scheduled_streams)
+                    schedule_to_save = list(scheduled_streams)
+
+            if queue_modified:
+                await asyncio.to_thread(save_json, SCHEDULED_FILE, schedule_to_save)
 
             tasks = []
             for c in yt_main:
