@@ -101,7 +101,7 @@ To monitor a Twitch channel, use the standard Twitch URL format. The application
 ```json
 {
     "name": "Twitch Streamer Name",
-    "url": "[https://www.twitch.tv/username](https://www.twitch.tv/username)",
+    "url": "https://www.twitch.tv/username",
     "monitor": ["live", "streams"]
 }
 ```
