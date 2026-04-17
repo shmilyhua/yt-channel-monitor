@@ -115,7 +115,8 @@ async def get_twitch_stream_info(username):
 def send_telegram_sync(payload):
     api_url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendPhoto"
     try:
-        requests.post(api_url, json=payload, timeout=15)
+        response = requests.post(api_url, json=payload, timeout=15)
+        response.raise_for_status()
     except Exception as e:
         logging.error(f"Telegram API Error: {e}")
 
@@ -245,85 +246,100 @@ async def process_channel(channel, allowed_tab, cookies_file):
         if not v_id or v_id == FREE_CHAT_ID: continue
         if not check_keywords(f"{item.get('title', '')} {item.get('description', '')}", keywords): continue
 
-        async with state_lock:
-            live_status = item.get('live_status')
-            
-            # 1. UPCOMING STATUS
-            if live_status == 'is_upcoming':
+        live_status = item.get('live_status')
+        
+        # 1. UPCOMING STATUS
+        if live_status == 'is_upcoming':
+            should_notify = False
+            async with state_lock:
                 if f"{v_id}_scheduled" not in seen_ids:
-                    if allowed_tab == 'videos':
-                        prefix = "SCHEDULED - PREMIERE" if keywords else "SCHEDULED - PREMIERE"
-                    else:
-                        prefix = "SCHEDULED - Collab" if keywords else f"SCHEDULED - {'Twitch' if is_twitch else 'Youtube'}"
-                        
-                    await send_telegram_notification(item, prefix, channel_name)
                     seen_ids[f"{v_id}_scheduled"] = None
                     state_modified = True
+                    should_notify = True
                     
-                    raw_sched = item.get('scheduled_timestamp') or item.get('release_timestamp')
-                    fallback = time.time() + 31536000
+            if should_notify:
+                if allowed_tab == 'videos':
+                    prefix = "SCHEDULED - PREMIERE" if keywords else "SCHEDULED - PREMIERE"
+                else:
+                    prefix = "SCHEDULED - Collab" if keywords else f"SCHEDULED - {'Twitch' if is_twitch else 'Youtube'}"
                     
-                    async with scheduled_lock:
-                        if not any(s['id'] == v_id for s in scheduled_streams):
-                            scheduled_streams.append({
-                                'id': v_id,
-                                'url': item.get('webpage_url', f"https://www.youtube.com/watch?v={v_id}"),
-                                'timestamp': float(raw_sched) if raw_sched else fallback,
-                                'channel_name': channel_name,
-                                'is_collab': bool(keywords),
-                                'is_twitch': is_twitch,
-                                'is_premiere': allowed_tab == 'videos'
-                            })
-                            await asyncio.to_thread(save_json, SCHEDULED_FILE, scheduled_streams)
-            
-            # 2. LIVE STATUS
-            elif live_status == 'is_live':
-                if is_twitch and '/videos/' in item.get('webpage_url', '').lower():
-                    continue
+                await send_telegram_notification(item, prefix, channel_name)
+                
+                raw_sched = item.get('scheduled_timestamp') or item.get('release_timestamp')
+                fallback = time.time() + 31536000
+                
+                async with scheduled_lock:
+                    if not any(s['id'] == v_id for s in scheduled_streams):
+                        scheduled_streams.append({
+                            'id': v_id,
+                            'url': item.get('webpage_url', f"https://www.youtube.com/watch?v={v_id}"),
+                            'timestamp': float(raw_sched) if raw_sched else fallback,
+                            'channel_name': channel_name,
+                            'is_collab': bool(keywords),
+                            'is_twitch': is_twitch,
+                            'is_premiere': allowed_tab == 'videos'
+                        })
+                        await asyncio.to_thread(save_json, SCHEDULED_FILE, scheduled_streams)
+        
+        # 2. LIVE STATUS
+        elif live_status == 'is_live':
+            if is_twitch and '/videos/' in item.get('webpage_url', '').lower():
+                continue
 
+            should_notify = False
+            async with state_lock:
                 state_marker = f"{v_id}_live"
                 if state_marker not in seen_ids:
-                    if allowed_tab == 'videos':
-                        prefix = "PREMIERE - Collab" if keywords else "PREMIERE - Youtube"
-                    else:
-                        prefix = "LIVE - Collab" if keywords else f"LIVE - {'Twitch' if is_twitch else 'Youtube'}"
-                        
-                    await send_telegram_notification(item, prefix, channel_name)
                     seen_ids[state_marker] = None
                     seen_ids.pop(f"{v_id}_scheduled", None)
                     state_modified = True
+                    should_notify = True
                     
-                    async with scheduled_lock:
-                        original_len = len(scheduled_streams)
-                        scheduled_streams = [s for s in scheduled_streams if s['id'] != v_id]
-                        if len(scheduled_streams) < original_len:
-                            await asyncio.to_thread(save_json, SCHEDULED_FILE, scheduled_streams)
+            if should_notify:
+                if allowed_tab == 'videos':
+                    prefix = "PREMIERE - Collab" if keywords else "PREMIERE - Youtube"
+                else:
+                    prefix = "LIVE - Collab" if keywords else f"LIVE - {'Twitch' if is_twitch else 'Youtube'}"
                     
-            # 3. PAST / VOD / STANDARD UPLOADS
-            else:
+                await send_telegram_notification(item, prefix, channel_name)
+                
+                async with scheduled_lock:
+                    original_len = len(scheduled_streams)
+                    scheduled_streams = [s for s in scheduled_streams if s['id'] != v_id]
+                    if len(scheduled_streams) < original_len:
+                        await asyncio.to_thread(save_json, SCHEDULED_FILE, scheduled_streams)
+                
+        # 3. PAST / VOD / STANDARD UPLOADS
+        else:
+            should_notify = False
+            prefix_label = ""
+            
+            async with state_lock:
                 if allowed_tab in ['videos', 'shorts']:
                     if f"{v_id}_live" in seen_ids and allowed_tab == 'videos':
                         if v_id not in seen_ids:
-                            await send_telegram_notification(item, "VIDEO UPLOAD", channel_name)
                             seen_ids[v_id] = None
                             seen_ids.pop(f"{v_id}_live", None)
                             state_modified = True
-                        continue
-
-                    if any(f"{v_id}{suffix}" in seen_ids for suffix in ['', '_scheduled', '_live', '_vod']): continue
-                    prefix = "NEW SHORTS" if allowed_tab == 'shorts' else "VIDEO UPLOAD"
-                    await send_telegram_notification(item, prefix, channel_name)
-                    seen_ids[v_id] = None
-                    state_modified = True
+                            should_notify = True
+                            prefix_label = "VIDEO UPLOAD"
+                    elif not any(f"{v_id}{suffix}" in seen_ids for suffix in ['', '_scheduled', '_live', '_vod']):
+                        seen_ids[v_id] = None
+                        state_modified = True
+                        should_notify = True
+                        prefix_label = "NEW SHORTS" if allowed_tab == 'shorts' else "VIDEO UPLOAD"
                 else:
                     state_marker = f"{v_id}_vod"
                     if state_marker not in seen_ids:
-                        prefix = "VOD ARCHIVE"
-                        await send_telegram_notification(item, prefix, channel_name)
                         seen_ids[state_marker] = None
                         seen_ids.pop(f"{v_id}_scheduled", None)
                         seen_ids.pop(f"{v_id}_live", None)
                         state_modified = True
+                        should_notify = True
+                        prefix_label = "VOD ARCHIVE"
+            
+            if should_notify:
+                await send_telegram_notification(item, prefix_label, channel_name)
 
     if state_modified:
         await save_state()
@@ -352,24 +368,28 @@ async def fast_block_worker(channels, cookies_file, interval):
                         items = await fetch_latest_items(stream['url'], cookies_file, m_type='targeted')
                         if items and items[0].get('live_status') == 'is_live':
                             needs_state_save = False
+                            should_notify_targeted = False
+                            
                             async with state_lock:
                                 if f"{v_id}_live" not in seen_ids:
-                                    
-                                    is_collab = stream.get('is_collab', False)
-                                    is_twitch = stream.get('is_twitch', False)
-                                    is_premiere = stream.get('is_premiere', False)
-                                    
-                                    if is_premiere:
-                                        prefix_label = "PREMIERE - Collab" if is_collab else "PREMIERE - Youtube"
-                                    elif is_collab:
-                                        prefix_label = "LIVE - Collab"
-                                    else:
-                                        prefix_label = f"LIVE - {'Twitch' if is_twitch else 'Youtube'}"
-                                        
-                                    await send_telegram_notification(items[0], prefix_label, stream['channel_name'])
                                     seen_ids[f"{v_id}_live"] = None
                                     seen_ids.pop(f"{v_id}_scheduled", None)
                                     needs_state_save = True
+                                    should_notify_targeted = True
+                                    
+                            if should_notify_targeted:
+                                is_collab = stream.get('is_collab', False)
+                                is_twitch = stream.get('is_twitch', False)
+                                is_premiere = stream.get('is_premiere', False)
+                                
+                                if is_premiere:
+                                    prefix_label = "PREMIERE - Collab" if is_collab else "PREMIERE - Youtube"
+                                elif is_collab:
+                                    prefix_label = "LIVE - Collab"
+                                else:
+                                    prefix_label = f"LIVE - {'Twitch' if is_twitch else 'Youtube'}"
+                                    
+                                await send_telegram_notification(items[0], prefix_label, stream['channel_name'])
                                     
                             if needs_state_save:
                                 await save_state()
