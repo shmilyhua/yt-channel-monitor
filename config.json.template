@@ -1,0 +1,250 @@
+{
+    "TELEGRAM_TOKEN": "YOUR_TELEGRAM_BOT_TOKEN",
+    "TELEGRAM_CHAT_ID": "YOUR_TARGET_CHAT_ID",
+    "TWITCH_CLIENT_ID": "YOUR_TWITCH_CLIENT_ID",
+    "TWITCH_CLIENT_SECRET": "YOUR_TWITCH_CLIENT_SECRET",
+    "COOKIES_FILE": "/path/to/your/www.youtube.com_cookies.txt",
+    
+    "LIVE_CHECK_INTERVAL": 65,
+    "MAIN_SCAN_INTERVAL": 129,
+    "COLLAB_SCAN_INTERVAL": 121,
+    
+    "CHANNELS": [
+        {
+            "name": "神楽めあ / KaguraMea",
+            "url": "https://www.youtube.com/@KaguraMea",
+            "monitor": ["live", "streams", "videos", "shorts"]
+        },
+        {
+            "name": "さぶめあちゃんねるっ!",
+            "url": "https://www.youtube.com/@KaguraMeaNyan",
+            "monitor": ["videos"]
+        },
+        {
+            "name": "汚い方の神楽めあ【公式】",
+            "url": "https://www.youtube.com/@めあ汚い",
+            "monitor": ["videos", "shorts"]
+        },
+        {
+            "name": "神楽めあ",
+            "url": "https://www.twitch.tv/kagura0mea",
+            "monitor": ["live", "streams"]
+        },
+        {
+            "name": "Tamaki Ch. 犬山たまき / 佃煮のりお",
+            "url": "https://www.youtube.com/@犬山たまき佃煮のりお",
+            "monitor": ["live", "streams", "videos", "shorts"],
+            "keywords": ["神楽めあ", "KaguraMea"]
+        },
+        {
+            "name": "Roberu Ch. 夕刻ロベル",
+            "url": "https://www.youtube.com/@YukokuRoberu",
+            "monitor": ["live", "streams", "videos", "shorts"],
+            "keywords": ["神楽めあ", "KaguraMea"]
+        },
+        {
+            "name": "Sakuna Ch. 結城さくな",
+            "url": "https://www.youtube.com/@結城さくな",
+            "monitor": ["live", "streams", "videos", "shorts"],
+            "keywords": ["神楽めあ", "KaguraMea"]
+        },
+        {
+            "name": "因幡はねる / Haneru Channel【ななしいんく】",
+            "url": "https://www.youtube.com/@Inaba_Haneru",
+            "monitor": ["live", "streams", "videos", "shorts"],
+            "keywords": ["神楽めあ", "KaguraMea"]
+        },
+        {
+            "name": "宗谷いちか / Ichika Channel【ななしいんく】",
+            "url": "https://www.youtube.com/@Ichika_Souya",
+            "monitor": ["live", "streams", "videos", "shorts"],
+            "keywords": ["神楽めあ", "KaguraMea"]
+        },
+        {
+            "name": "Chinami Channel ♡ 毒ヶ衣ちなみ【Vtuber】",
+            "url": "https://www.youtube.com/@毒ヶ衣ちなみChinamiChannel",
+            "monitor": ["live", "streams", "videos", "shorts"],
+            "keywords": ["神楽めあ", "KaguraMea"]
+        },
+        {
+            "name": "Patra Channel / 周防パトラ",
+            "url": "https://www.youtube.com/@Patra_Suou",
+            "monitor": ["live", "streams", "videos", "shorts"],
+            "keywords": ["神楽めあ", "KaguraMea"]
+        },
+        {
+            "name": "Ran Channel / 日ノ隈らん",
+            "url": "https://www.youtube.com/@Ran_Hinokuma",
+            "monitor": ["live", "streams", "videos", "shorts"],
+            "keywords": ["神楽めあ", "KaguraMea"]
+        },
+        {
+            "name": "Tomari Mari channel / 兎鞠まりちゃんねる",
+            "url": "https://www.youtube.com/@TOMARI_MARI",
+            "monitor": ["live", "streams", "videos", "shorts"],
+            "keywords": ["神楽めあ", "KaguraMea"]
+        },
+        {
+            "name": "バーチャル債務者youtuber天開司",
+            "url": "https://www.youtube.com/@tenkaitsukasa",
+            "monitor": ["live", "streams", "videos", "shorts"],
+            "keywords": ["神楽めあ", "KaguraMea"]
+        },
+        {
+            "name": "北小路ヒスイ / Kitakoji Hisui 【にじさんじ】",
+            "url": "https://www.youtube.com/@KitakojiHisui",
+            "monitor": ["live", "streams", "videos", "shorts"],
+            "keywords": ["神楽めあ", "KaguraMea"]
+        },
+        {
+            "name": "魔界ノりりむ",
+            "url": "https://www.youtube.com/@MakainoRirimu",
+            "monitor": ["live", "streams", "videos", "shorts"],
+            "keywords": ["神楽めあ", "KaguraMea"]
+        },
+        {
+            "name": "聖女れりあ / Hijirime_Laeria",
+            "url": "https://www.youtube.com/@Hijirime_Laeria",
+            "monitor": ["live", "streams", "videos", "shorts"],
+            "keywords": ["神楽めあ", "KaguraMea"]
+        },
+        {
+            "name": "舞元啓介",
+            "url": "https://www.youtube.com/@MaimotoKeisuke",
+            "monitor": ["live", "streams", "videos", "shorts"],
+            "keywords": ["神楽めあ", "KaguraMea"]
+        },
+        {
+            "name": "星川サラ / Sara Hoshikawa",
+            "url": "https://www.youtube.com/@HoshikawaSara",
+            "monitor": ["live", "streams", "videos", "shorts"],
+            "keywords": ["神楽めあ", "KaguraMea"]
+        },
+        {
+            "name": "橘ひなの / Hinano Tachibana",
+            "url": "https://www.youtube.com/@hinanotachiba7",
+            "monitor": ["live", "streams", "videos", "shorts"],
+            "keywords": ["神楽めあ", "KaguraMea"]
+        },
+        {
+            "name": "SHAKAch",
+            "url": "https://www.youtube.com/@SHAKAch",
+            "monitor": ["live", "streams", "videos", "shorts"],
+            "keywords": ["神楽めあ", "KaguraMea"]
+        },
+        {
+            "name": "Zerost Channel",
+            "url": "https://www.youtube.com/@Zerost",
+            "monitor": ["live", "streams", "videos", "shorts"],
+            "keywords": ["神楽めあ", "KaguraMea"]
+        },
+        {
+            "name": "mittiii 【みっちー】",
+            "url": "https://www.youtube.com/@mittiii",
+            "monitor": ["live", "streams", "videos", "shorts"],
+            "keywords": ["神楽めあ", "KaguraMea"]
+        },
+        {
+            "name": "k4sen / かせん",
+            "url": "https://www.youtube.com/@zzxk4sen",
+            "monitor": ["live", "streams", "videos", "shorts"],
+            "keywords": ["神楽めあ", "KaguraMea"]
+        },
+        {
+            "name": "千燈ゆうひ",
+            "url": "https://www.youtube.com/@SendoYuuhi",
+            "monitor": ["live", "streams", "videos", "shorts"],
+            "keywords": ["神楽めあ", "KaguraMea"]
+        },
+        {
+            "name": "けんき",
+            "url": "https://www.youtube.com/@Kenki521",
+            "monitor": ["live", "streams", "videos", "shorts"],
+            "keywords": ["神楽めあ", "KaguraMea"]
+        },
+        {
+            "name": "Uruca ch /うるか",
+            "url": "https://www.youtube.com/@CR_uruca",
+            "monitor": ["live", "streams", "videos", "shorts"],
+            "keywords": ["神楽めあ", "KaguraMea"]
+        },
+        {
+            "name": "赤見かるび / Karubi Akami",
+            "url": "https://www.youtube.com/@AkamiKarubi",
+            "monitor": ["live", "streams", "videos", "shorts"],
+            "keywords": ["神楽めあ", "KaguraMea"]
+        },
+        {
+            "name": "白波らむね / Shiranami Ramune",
+            "url": "https://www.youtube.com/@shiranamiramune",
+            "monitor": ["live", "streams", "videos", "shorts"],
+            "keywords": ["神楽めあ", "KaguraMea"]
+        },
+        {
+            "name": "たまこ。Ch./あおぎり高校",
+            "url": "https://www.youtube.com/@tamako0212",
+            "monitor": ["live", "streams", "videos", "shorts"],
+            "keywords": ["神楽めあ", "KaguraMea"]
+        },
+        {
+            "name": "胡桃のあ",
+            "url": "https://www.youtube.com/@963Noah",
+            "monitor": ["live", "streams", "videos", "shorts"],
+            "keywords": ["神楽めあ", "KaguraMea"]
+        },
+        {
+            "name": "Rieru Ch. 我部りえる /あおぎり高校",
+            "url": "https://www.youtube.com/@rieru0830",
+            "monitor": ["live", "streams", "videos", "shorts"],
+            "keywords": ["神楽めあ", "KaguraMea"]
+        },
+        {
+            "name": "メイカちゃんねる",
+            "url": "https://www.youtube.com/@UTAIMEIKA",
+            "monitor": ["live", "streams", "videos", "shorts"],
+            "keywords": ["神楽めあ", "KaguraMea"]
+        },
+        {
+            "name": "しぐれうい",
+            "url": "https://www.youtube.com/@ui_shig",
+            "monitor": ["live", "streams", "videos", "shorts"],
+            "keywords": ["神楽めあ", "KaguraMea"]
+        },
+        {
+            "name": "しゃるるch",
+            "url": "https://www.youtube.com/@syaruruch",
+            "monitor": ["live", "streams", "videos", "shorts"],
+            "keywords": ["神楽めあ", "KaguraMea"]
+        },
+        {
+            "name": "Kuzuha Channel",
+            "url": "https://www.youtube.com/@Kuzuha",
+            "monitor": ["live", "streams", "videos", "shorts"],
+            "keywords": ["神楽めあ", "KaguraMea"]
+        },
+        {
+            "name": "かみと-KamitoChannel-",
+            "url": "https://www.youtube.com/@-kamitochannel-2486",
+            "monitor": ["live", "streams", "videos", "shorts"],
+            "keywords": ["神楽めあ", "KaguraMea"]
+        },
+        {
+            "name": "伊東ライフ",
+            "url": "https://www.youtube.com/@伊東ライフ",
+            "monitor": ["live", "streams", "videos", "shorts"],
+            "keywords": ["神楽めあ", "KaguraMea"]
+        },
+        {
+            "name": "犯罪学教室のかなえ先生 V Criminologist",
+            "url": "https://www.youtube.com/@KanaeVCriminologist",
+            "monitor": ["live", "streams", "videos", "shorts"],
+            "keywords": ["神楽めあ", "KaguraMea"]
+        },
+        {
+            "name": "うらめちゃんねる /あおぎり高校",
+            "url": "https://www.youtube.com/@urame0711",
+            "monitor": ["live", "streams", "videos", "shorts"],
+            "keywords": ["神楽めあ", "KaguraMea"]
+        }
+    ]
+}
