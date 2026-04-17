@@ -367,61 +367,63 @@ async def fast_block_worker(channels, cookies_file, interval):
     
     while True:
         try:
-            queue_modified = False
-            schedule_to_save = []
-            
+            # 1. Snapshot queue in memory
             async with scheduled_lock:
-                updated_queue = []
-                current_time = time.time()
+                current_queue = list(scheduled_streams)
+                
+            queue_modified = False
+            current_time = time.time()
+            streams_to_remove = set()
 
-                for stream in sorted(scheduled_streams, key=lambda x: x.get('timestamp', 0)):
-                    v_id = stream['id']
-                    if current_time > stream['timestamp'] + STALE_SCHEDULE_THRESHOLD_SEC:
-                        logging.info(f"Dropping stale stream: {v_id}")
-                        queue_modified = True
-                        continue
+            # 2. Iterate snapshot outside the lock
+            for stream in sorted(current_queue, key=lambda x: x.get('timestamp', 0)):
+                v_id = stream['id']
+                if current_time > stream['timestamp'] + STALE_SCHEDULE_THRESHOLD_SEC:
+                    logging.info(f"Dropping stale stream: {v_id}")
+                    streams_to_remove.add(v_id)
+                    queue_modified = True
+                    continue
 
-                    if current_time >= stream['timestamp'] - TARGETED_POLL_PRE_START_SEC:
-                        logging.info(f"Polling targeted schedule: {v_id}")
-                        items = await fetch_latest_items(stream['url'], cookies_file, m_type='targeted')
-                        if items and items[0].get('live_status') == 'is_live':
-                            needs_state_save = False
-                            should_notify_targeted = False
+                if current_time >= stream['timestamp'] - TARGETED_POLL_PRE_START_SEC:
+                    logging.info(f"Polling targeted schedule: {v_id}")
+                    items = await fetch_latest_items(stream['url'], cookies_file, m_type='targeted')
+                    if items and items[0].get('live_status') == 'is_live':
+                        needs_state_save = False
+                        should_notify_targeted = False
+                        
+                        async with state_lock:
+                            if f"{v_id}_live" not in seen_ids:
+                                seen_ids[f"{v_id}_live"] = None
+                                seen_ids.pop(f"{v_id}_scheduled", None)
+                                needs_state_save = True
+                                should_notify_targeted = True
+                                
+                        if should_notify_targeted:
+                            is_collab = stream.get('is_collab', False)
+                            is_twitch = stream.get('is_twitch', False)
+                            is_premiere = stream.get('is_premiere', False)
                             
-                            async with state_lock:
-                                if f"{v_id}_live" not in seen_ids:
-                                    seen_ids[f"{v_id}_live"] = None
-                                    seen_ids.pop(f"{v_id}_scheduled", None)
-                                    needs_state_save = True
-                                    should_notify_targeted = True
-                                    
-                            if should_notify_targeted:
-                                is_collab = stream.get('is_collab', False)
-                                is_twitch = stream.get('is_twitch', False)
-                                is_premiere = stream.get('is_premiere', False)
+                            if is_premiere:
+                                prefix_label = "PREMIERE - Collab" if is_collab else "PREMIERE - Youtube"
+                            elif is_collab:
+                                prefix_label = "LIVE - Collab"
+                            else:
+                                prefix_label = f"LIVE - {'Twitch' if is_twitch else 'Youtube'}"
                                 
-                                if is_premiere:
-                                    prefix_label = "PREMIERE - Collab" if is_collab else "PREMIERE - Youtube"
-                                elif is_collab:
-                                    prefix_label = "LIVE - Collab"
-                                else:
-                                    prefix_label = f"LIVE - {'Twitch' if is_twitch else 'Youtube'}"
-                                    
-                                await send_telegram_notification(items[0], prefix_label, stream['channel_name'])
-                                    
-                            if needs_state_save:
-                                await save_state()
+                            await send_telegram_notification(items[0], prefix_label, stream['channel_name'])
                                 
-                            queue_modified = True
-                            continue
+                        if needs_state_save:
+                            await save_state()
+                            
+                        streams_to_remove.add(v_id)
+                        queue_modified = True
 
-                    updated_queue.append(stream)
-
-                if queue_modified:
-                    scheduled_streams = updated_queue
-                    schedule_to_save = list(scheduled_streams)
-
+            # 3. Re-acquire lock to apply deletions (preserving concurrent additions)
             if queue_modified:
+                async with scheduled_lock:
+                    scheduled_streams = [s for s in scheduled_streams if s['id'] not in streams_to_remove]
+                    schedule_to_save = list(scheduled_streams)
+                    
                 await asyncio.to_thread(save_json, SCHEDULED_FILE, schedule_to_save)
 
             tasks = []
