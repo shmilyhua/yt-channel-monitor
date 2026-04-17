@@ -7,6 +7,7 @@ import html
 import shutil
 import logging
 import re
+import uuid
 from datetime import datetime
 
 LOG_FILE = 'monitor.log'
@@ -14,6 +15,9 @@ CONFIG_FILE = 'config.json'
 STATE_FILE = 'seen_ids.json'
 SCHEDULED_FILE = 'scheduled.json'
 MAX_HISTORY = 1000
+
+STALE_SCHEDULE_THRESHOLD_SEC = 21600
+TARGETED_POLL_PRE_START_SEC = 300
 
 logging.basicConfig(
     level=logging.INFO,
@@ -28,6 +32,7 @@ logging.basicConfig(
 # --- LOCKS FOR CONCURRENT WRITES ---
 state_lock = asyncio.Lock()
 scheduled_lock = asyncio.Lock()
+telegram_lock = asyncio.Lock()
 
 def load_json(filepath, default):
     if not os.path.exists(filepath):
@@ -51,12 +56,15 @@ FREE_CHAT_ID = config.get('FREE_CHAT_ID', '')
 
 twitch_access_token = None
 twitch_token_expiry = 0
-seen_ids_set = set(load_json(STATE_FILE, []))
+
+# Using dict keys to preserve insertion order for state truncation
+seen_ids = dict.fromkeys(load_json(STATE_FILE, []))
 
 # --- ASYNC HELPER FUNCTIONS ---
 async def save_state():
     async with state_lock:
-        capped_state = list(seen_ids_set)[-MAX_HISTORY:] if len(seen_ids_set) > MAX_HISTORY else list(seen_ids_set)
+        keys = list(seen_ids.keys())
+        capped_state = keys[-MAX_HISTORY:] if len(keys) > MAX_HISTORY else keys
         await asyncio.to_thread(save_json, STATE_FILE, capped_state)
 
 def get_twitch_stream_info_sync(username):
@@ -101,7 +109,6 @@ def send_telegram_sync(payload):
     api_url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendPhoto"
     try:
         requests.post(api_url, json=payload, timeout=15)
-        time.sleep(1.5) # Built-in rate limit protection
     except Exception as e:
         logging.error(f"Telegram API Error: {e}")
 
@@ -109,7 +116,6 @@ async def send_telegram_notification(data, prefix, channel_name):
     video_id = data.get('id')
     raw_title = data.get('title', 'Unknown Title')
     
-    # Strip trailing yt-dlp timestamp fallback (e.g., " 2026-04-17 23:01")
     raw_title = re.sub(r'\s\d{4}-\d{2}-\d{2}\s\d{2}:\d{2}$', '', raw_title)
     
     url = data.get('webpage_url', f"https://www.youtube.com/watch?v={video_id}")    
@@ -117,10 +123,8 @@ async def send_telegram_notification(data, prefix, channel_name):
         match = re.search(r'twitch\.tv/([^/?]+)', url.lower())
         if match:
             username = match.group(1)
-            # Fetch both game name and title from the updated API function
             game_name, twitch_title = await get_twitch_stream_info(username)
             
-            # Overwrite the yt-dlp generic title with the official Twitch title
             if twitch_title:
                 raw_title = twitch_title
                 
@@ -132,19 +136,16 @@ async def send_telegram_notification(data, prefix, channel_name):
     actual_ts = data.get('timestamp')
     duration_raw = data.get('duration')
 
-    # Prioritize scheduled/release timestamp to show correct live times, fallback to actual upload timestamp
     best_ts = sched_ts if sched_ts else actual_ts
 
     if best_ts:
         start_time_dt = datetime.fromtimestamp(float(best_ts))
         time_str = f" | Time: {start_time_dt.strftime('%Y-%m-%d %H:%M')}"
         
-        # Calculate and append finish time specifically for VODs
         if prefix == "VOD ARCHIVE" and duration_raw:
             end_ts = float(best_ts) + float(duration_raw)
             end_time_dt = datetime.fromtimestamp(end_ts)
             
-            # Format conditionally: omits the date if the stream started and ended on the same day
             if start_time_dt.date() == end_time_dt.date():
                 time_str += f" \u2014 Ended: {end_time_dt.strftime('%H:%M')}"
             else:
@@ -172,10 +173,13 @@ async def send_telegram_notification(data, prefix, channel_name):
     }
     
     logging.info(f"Notification queued: {raw_title}")
-    await asyncio.to_thread(send_telegram_sync, payload)
+    
+    async with telegram_lock:
+        await asyncio.to_thread(send_telegram_sync, payload)
+        await asyncio.sleep(1.5)
 
 async def fetch_latest_items(target_url, master_cookies_file, m_type=''):
-    temp_cookies = f"{master_cookies_file}.{time.time()}.tmp"
+    temp_cookies = f"{master_cookies_file}.{uuid.uuid4().hex}.tmp"
     if os.path.exists(master_cookies_file):
         await asyncio.to_thread(shutil.copy2, master_cookies_file, temp_cookies)
     else:
@@ -223,11 +227,9 @@ async def process_channel(channel, allowed_tab, cookies_file):
     keywords = channel.get('keywords', [])
     is_twitch = 'twitch.tv' in base_url.lower()
     
-    # Twitch has no 'shorts' tab. Exit early to save network requests.
     if is_twitch and allowed_tab == 'shorts':
         return
         
-    # Route Twitch VODs correctly to their video page
     if is_twitch:
         if allowed_tab in ['videos', 'streams']:
             target_url = f"{base_url.rstrip('/')}/videos"
@@ -248,14 +250,14 @@ async def process_channel(channel, allowed_tab, cookies_file):
             
             # 1. UPCOMING STATUS
             if live_status == 'is_upcoming':
-                if f"{v_id}_scheduled" not in seen_ids_set:
+                if f"{v_id}_scheduled" not in seen_ids:
                     if allowed_tab == 'videos':
                         prefix = "SCHEDULED - PREMIERE" if keywords else "SCHEDULED - PREMIERE"
                     else:
                         prefix = "SCHEDULED - Collab" if keywords else f"SCHEDULED - {'Twitch' if is_twitch else 'Youtube'}"
                         
                     await send_telegram_notification(item, prefix, channel_name)
-                    seen_ids_set.add(f"{v_id}_scheduled")
+                    seen_ids[f"{v_id}_scheduled"] = None
                     state_modified = True
                     
                     raw_sched = item.get('scheduled_timestamp') or item.get('release_timestamp')
@@ -277,23 +279,21 @@ async def process_channel(channel, allowed_tab, cookies_file):
             
             # 2. LIVE STATUS
             elif live_status == 'is_live':
-                # Bypass duplicate notifications for ongoing Twitch VODs
                 if is_twitch and '/videos/' in item.get('webpage_url', '').lower():
                     continue
 
                 state_marker = f"{v_id}_live"
-                if state_marker not in seen_ids_set:
+                if state_marker not in seen_ids:
                     if allowed_tab == 'videos':
                         prefix = "PREMIERE - Collab" if keywords else "PREMIERE - Youtube"
                     else:
                         prefix = "LIVE - Collab" if keywords else f"LIVE - {'Twitch' if is_twitch else 'Youtube'}"
                         
                     await send_telegram_notification(item, prefix, channel_name)
-                    seen_ids_set.add(state_marker)
-                    seen_ids_set.discard(f"{v_id}_scheduled") # Remove old state
+                    seen_ids[state_marker] = None
+                    seen_ids.pop(f"{v_id}_scheduled", None)
                     state_modified = True
                     
-                    # Ensure it is removed from scheduled.json if detected here
                     async with scheduled_lock:
                         sched_list = await asyncio.to_thread(load_json, SCHEDULED_FILE, [])
                         original_len = len(sched_list)
@@ -304,29 +304,27 @@ async def process_channel(channel, allowed_tab, cookies_file):
             # 3. PAST / VOD / STANDARD UPLOADS
             else:
                 if allowed_tab in ['videos', 'shorts']:
-                    # Intercept finished premieres and transition them to Video Uploads
-                    if f"{v_id}_live" in seen_ids_set and allowed_tab == 'videos':
-                        if v_id not in seen_ids_set:
+                    if f"{v_id}_live" in seen_ids and allowed_tab == 'videos':
+                        if v_id not in seen_ids:
                             await send_telegram_notification(item, "VIDEO UPLOAD", channel_name)
-                            seen_ids_set.add(v_id)
-                            seen_ids_set.discard(f"{v_id}_live")
+                            seen_ids[v_id] = None
+                            seen_ids.pop(f"{v_id}_live", None)
                             state_modified = True
                         continue
 
-                    # Standard upload filter and logic
-                    if any(f"{v_id}{suffix}" in seen_ids_set for suffix in ['', '_scheduled', '_live', '_vod']): continue
+                    if any(f"{v_id}{suffix}" in seen_ids for suffix in ['', '_scheduled', '_live', '_vod']): continue
                     prefix = "NEW SHORTS" if allowed_tab == 'shorts' else "VIDEO UPLOAD"
                     await send_telegram_notification(item, prefix, channel_name)
-                    seen_ids_set.add(v_id)
+                    seen_ids[v_id] = None
                     state_modified = True
                 else:
                     state_marker = f"{v_id}_vod"
-                    if state_marker not in seen_ids_set:
+                    if state_marker not in seen_ids:
                         prefix = "VOD ARCHIVE"
                         await send_telegram_notification(item, prefix, channel_name)
-                        seen_ids_set.add(state_marker)
-                        seen_ids_set.discard(f"{v_id}_scheduled") # Clean up old markers
-                        seen_ids_set.discard(f"{v_id}_live")
+                        seen_ids[state_marker] = None
+                        seen_ids.pop(f"{v_id}_scheduled", None)
+                        seen_ids.pop(f"{v_id}_live", None)
                         state_modified = True
 
     if state_modified:
@@ -334,12 +332,10 @@ async def process_channel(channel, allowed_tab, cookies_file):
 
 # --- ASYNC WORKERS ---
 async def fast_block_worker(channels, cookies_file, interval):
-    # Treat Twitch as standard main channels
     yt_main = [c for c in channels if not c.get('keywords')]
     
     while True:
         try:
-            # 1. Scheduled Queue Check
             async with scheduled_lock:
                 scheduled_streams = await asyncio.to_thread(load_json, SCHEDULED_FILE, [])
                 updated_queue = []
@@ -348,20 +344,19 @@ async def fast_block_worker(channels, cookies_file, interval):
 
                 for stream in sorted(scheduled_streams, key=lambda x: x.get('timestamp', 0)):
                     v_id = stream['id']
-                    if current_time > stream['timestamp'] + 21600:
+                    if current_time > stream['timestamp'] + STALE_SCHEDULE_THRESHOLD_SEC:
                         logging.info(f"Dropping stale stream: {v_id}")
                         queue_modified = True
                         continue
 
-                    if current_time >= stream['timestamp'] - 300:
+                    if current_time >= stream['timestamp'] - TARGETED_POLL_PRE_START_SEC:
                         logging.info(f"Polling targeted schedule: {v_id}")
                         items = await fetch_latest_items(stream['url'], cookies_file, m_type='targeted')
                         if items and items[0].get('live_status') == 'is_live':
                             needs_state_save = False
                             async with state_lock:
-                                if f"{v_id}_live" not in seen_ids_set:
+                                if f"{v_id}_live" not in seen_ids:
                                     
-                                    # Dynamically reconstruct the prefix
                                     is_collab = stream.get('is_collab', False)
                                     is_twitch = stream.get('is_twitch', False)
                                     is_premiere = stream.get('is_premiere', False)
@@ -374,8 +369,8 @@ async def fast_block_worker(channels, cookies_file, interval):
                                         prefix_label = f"LIVE - {'Twitch' if is_twitch else 'Youtube'}"
                                         
                                     await send_telegram_notification(items[0], prefix_label, stream['channel_name'])
-                                    seen_ids_set.add(f"{v_id}_live")
-                                    seen_ids_set.discard(f"{v_id}_scheduled") # Remove old state
+                                    seen_ids[f"{v_id}_live"] = None
+                                    seen_ids.pop(f"{v_id}_scheduled", None)
                                     needs_state_save = True
                                     
                             if needs_state_save:
@@ -389,10 +384,8 @@ async def fast_block_worker(channels, cookies_file, interval):
                 if queue_modified:
                     await asyncio.to_thread(save_json, SCHEDULED_FILE, updated_queue)
 
-            # 2. Main Live / Twitch Checks
             tasks = []
             for c in yt_main:
-                is_twitch = 'twitch.tv' in c.get('url', '').lower()
                 if 'live' in c.get('monitor', []):
                     tasks.append(process_channel(c, 'live', cookies_file))
                     
@@ -406,7 +399,6 @@ async def fast_block_worker(channels, cookies_file, interval):
 async def rolling_queue_worker(queue_name, channels, tabs, interval, cookies_file):
     if not channels: return
     
-    # Pre-calculate a flat list of only valid (channel, tab) pairs
     execution_queue = []
     for c in channels:
         monitored_tabs = c.get('monitor', ['streams'])
@@ -439,13 +431,11 @@ async def main():
     main_interval = config.get('MAIN_SCAN_INTERVAL', 60)
     collab_interval = config.get('COLLAB_SCAN_INTERVAL', 60)
     
-    # Remove the Twitch exclusions so they join the rolling queues
     yt_main = [c for c in channels if not c.get('keywords')]
     yt_collab = [c for c in channels if c.get('keywords')]
 
     logging.info(f"Async Monitor active. Main Interval: {main_interval}s | Collab Interval: {collab_interval}s")
 
-    # Spawn independent workers
     tasks = [
         asyncio.create_task(fast_block_worker(channels, cookies_file, live_interval)),
         asyncio.create_task(rolling_queue_worker("Main", yt_main, ['streams', 'videos', 'shorts'], main_interval, cookies_file)),
