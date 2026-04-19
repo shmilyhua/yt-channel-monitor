@@ -152,10 +152,11 @@ async def send_telegram_notification(data, prefix, channel_name):
         time_str = f" | Uploaded: {start_time_dt.strftime('%Y-%m-%d %H:%M')}"
 
     # Append duration if it's an archive
-    if prefix == "VOD ARCHIVE" and duration_raw and sched_ts:
-        end_ts = float(sched_ts) + float(duration_raw)
+    base_ts = sched_ts or actual_ts
+    if prefix == "VOD ARCHIVE" and duration_raw and base_ts:
+        end_ts = float(base_ts) + float(duration_raw)
         end_time_dt = datetime.fromtimestamp(end_ts)
-        start_time_dt = datetime.fromtimestamp(float(sched_ts))
+        start_time_dt = datetime.fromtimestamp(float(base_ts))
         if start_time_dt.date() == end_time_dt.date():
             time_str += f" \u2014 Ended: {end_time_dt.strftime('%H:%M')}"
         else:
