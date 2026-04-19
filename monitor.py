@@ -134,37 +134,32 @@ async def send_telegram_notification(data, prefix, channel_name):
         if match:
             username = match.group(1)
             game_name, twitch_title = await get_twitch_stream_info(username)
-            
-            if twitch_title:
-                raw_title = twitch_title
-                
-            if game_name:
-                raw_title = f"{raw_title} \u2014 {game_name}"
+            if twitch_title: raw_title = twitch_title
+            if game_name: raw_title = f"{raw_title} \u2014 {game_name}"
 
     time_str = ""
+    # Prioritize scheduled or actual release time (Deep Extraction keys)
     sched_ts = data.get('scheduled_timestamp') or data.get('release_timestamp')
     actual_ts = data.get('timestamp')
     duration_raw = data.get('duration')
 
-    if "LIVE" in prefix:
-        best_ts = None
-    elif "SCHEDULED" in prefix:
-        best_ts = sched_ts or actual_ts
-    else:
-        best_ts = actual_ts or sched_ts
+    # If deep extraction found the true start time, use it. Otherwise, use standard upload timestamp.
+    if sched_ts:
+        start_time_dt = datetime.fromtimestamp(float(sched_ts))
+        time_str = f" | Start: {start_time_dt.strftime('%Y-%m-%d %H:%M')}"
+    elif actual_ts and prefix in ["VOD ARCHIVE", "VIDEO UPLOAD"]:
+        start_time_dt = datetime.fromtimestamp(float(actual_ts))
+        time_str = f" | Uploaded: {start_time_dt.strftime('%Y-%m-%d %H:%M')}"
 
-    if best_ts:
-        start_time_dt = datetime.fromtimestamp(float(best_ts))
-        time_str = f" | Time: {start_time_dt.strftime('%Y-%m-%d %H:%M')}"
-        
-        if prefix == "VOD ARCHIVE" and duration_raw:
-            end_ts = float(best_ts) + float(duration_raw)
-            end_time_dt = datetime.fromtimestamp(end_ts)
-            
-            if start_time_dt.date() == end_time_dt.date():
-                time_str += f" \u2014 Ended: {end_time_dt.strftime('%H:%M')}"
-            else:
-                time_str += f" \u2014 Ended: {end_time_dt.strftime('%m-%d %H:%M')}"
+    # Append duration if it's an archive
+    if prefix == "VOD ARCHIVE" and duration_raw and sched_ts:
+        end_ts = float(sched_ts) + float(duration_raw)
+        end_time_dt = datetime.fromtimestamp(end_ts)
+        start_time_dt = datetime.fromtimestamp(float(sched_ts))
+        if start_time_dt.date() == end_time_dt.date():
+            time_str += f" \u2014 Ended: {end_time_dt.strftime('%H:%M')}"
+        else:
+            time_str += f" \u2014 Ended: {end_time_dt.strftime('%m-%d %H:%M')}"
 
     duration_str = ""
     if duration_raw:
@@ -322,12 +317,24 @@ async def process_channel(channel, allowed_tab, cookies_file):
                     should_notify = True
                     
             if should_notify:
+                # Perform a Deep Extraction to grab release_timestamp (actual start time)
+                rich_item = item
+                if not is_twitch:
+                    watch_url = f"https://www.youtube.com/watch?v={v_id}"
+                    logging.info(f"Deep extraction for true start time: {v_id}")
+                    try:
+                        deep_data = await fetch_latest_items(watch_url, cookies_file, m_type='live')
+                        if deep_data:
+                            rich_item = deep_data[0]
+                    except Exception as e:
+                        logging.warning(f"Deep extraction failed, using shallow data: {e}")
+
                 if allowed_tab == 'videos':
                     prefix = "PREMIERE - Collab" if keywords else "PREMIERE - Youtube"
                 else:
                     prefix = "LIVE - Collab" if keywords else f"LIVE - {'Twitch' if is_twitch else 'Youtube'}"
                     
-                await send_telegram_notification(item, prefix, channel_name)
+                await send_telegram_notification(rich_item, prefix, channel_name)
                 
                 needs_schedule_save = False
                 schedule_to_save = []
