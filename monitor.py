@@ -146,7 +146,12 @@ async def send_telegram_notification(data, prefix, channel_name):
     actual_ts = data.get('timestamp')
     duration_raw = data.get('duration')
 
-    best_ts = sched_ts if sched_ts else actual_ts
+    if "LIVE" in prefix:
+        best_ts = None
+    elif "SCHEDULED" in prefix:
+        best_ts = sched_ts or actual_ts
+    else:
+        best_ts = actual_ts or sched_ts
 
     if best_ts:
         start_time_dt = datetime.fromtimestamp(float(best_ts))
