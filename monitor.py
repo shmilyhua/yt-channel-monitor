@@ -146,10 +146,10 @@ async def send_telegram_notification(data, prefix, channel_name):
     # If deep extraction found the true start time, use it. Otherwise, use standard upload timestamp.
     if sched_ts:
         start_time_dt = datetime.fromtimestamp(float(sched_ts))
-        time_str = f" | Start: {start_time_dt.strftime('%Y-%m-%d %H:%M')}"
-    elif actual_ts and prefix in ["VOD ARCHIVE", "VIDEO UPLOAD"]:
+        time_str = f" | Time: {start_time_dt.strftime('%Y-%m-%d %H:%M')}"
+    elif actual_ts and prefix in ["VOD ARCHIVE", "VIDEO UPLOAD", "NEW SHORTS"]:
         start_time_dt = datetime.fromtimestamp(float(actual_ts))
-        time_str = f" | Uploaded: {start_time_dt.strftime('%Y-%m-%d %H:%M')}"
+        time_str = f" | Time: {start_time_dt.strftime('%Y-%m-%d %H:%M')}"
 
     # Append duration if it's an archive
     base_ts = sched_ts or actual_ts
