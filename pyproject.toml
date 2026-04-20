@@ -4,5 +4,5 @@ version = "1.0.0"
 description = "A yt-dlp wrapper to monitor YouTube and Twitch channels for Kagura Mea."
 requires-python = ">=3.10"
 dependencies = [
-    "requests>=2.31.0"
+    "aiohttp>=3.9.0"
 ]
