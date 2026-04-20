@@ -2,20 +2,36 @@ import asyncio
 import time
 import json
 import os
-import requests
 import html
 import logging
 import re
+import aiohttp
 from datetime import datetime
+from collections import OrderedDict
 
-LOG_FILE = 'monitor.log'
 CONFIG_FILE = 'config.json'
-STATE_FILE = 'seen_ids.json'
-SCHEDULED_FILE = 'scheduled.json'
-MAX_HISTORY = 1000
 
-STALE_SCHEDULE_THRESHOLD_SEC = 21600
-TARGETED_POLL_PRE_START_SEC = 300
+def load_json(filepath, default):
+    if not os.path.exists(filepath):
+        return default
+    with open(filepath, 'r', encoding='utf-8') as f:
+        try:
+            return json.load(f)
+        except json.JSONDecodeError:
+            return default
+
+def save_json_atomic(filepath, data):
+    tmp_path = f"{filepath}.tmp"
+    with open(tmp_path, 'w', encoding='utf-8') as f:
+        json.dump(data, f, indent=2)
+    os.replace(tmp_path, filepath)
+
+config = load_json(CONFIG_FILE, {})
+
+LOG_FILE = config.get('LOG_FILE', 'monitor.log')
+STATE_FILE = config.get('STATE_FILE', 'seen_ids.json')
+SCHEDULED_FILE = config.get('SCHEDULED_FILE', 'scheduled.json')
+MAX_HISTORY = config.get('MAX_HISTORY', 1000)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -27,49 +43,34 @@ logging.basicConfig(
     ]
 )
 
-# --- LOCKS FOR CONCURRENT OPERATIONS ---
-state_lock = asyncio.Lock()
-scheduled_lock = asyncio.Lock()
-telegram_lock = asyncio.Lock()
-twitch_auth_lock = asyncio.Lock()
-
-def load_json(filepath, default):
-    if not os.path.exists(filepath):
-        return default
-    with open(filepath, 'r', encoding='utf-8') as f:
-        try:
-            return json.load(f)
-        except json.JSONDecodeError:
-            return default
-
-def save_json(filepath, data):
-    with open(filepath, 'w', encoding='utf-8') as f:
-        json.dump(data, f, indent=2)
-
-config = load_json(CONFIG_FILE, {})
 TELEGRAM_TOKEN = config.get('TELEGRAM_TOKEN')
 TELEGRAM_CHAT_ID = config.get('TELEGRAM_CHAT_ID')
 TWITCH_CLIENT_ID = config.get('TWITCH_CLIENT_ID')
 TWITCH_CLIENT_SECRET = config.get('TWITCH_CLIENT_SECRET')
 FREE_CHAT_ID = config.get('FREE_CHAT_ID', '')
 
+STALE_SCHEDULE_THRESHOLD_SEC = 21600
+TARGETED_POLL_PRE_START_SEC = 300
+
 twitch_access_token = None
 twitch_token_expiry = 0
 
-# In-memory state tracking to prevent disk thrashing
-seen_ids = dict.fromkeys(load_json(STATE_FILE, []))
+state_lock = asyncio.Lock()
+scheduled_lock = asyncio.Lock()
+telegram_lock = asyncio.Lock()
+twitch_auth_lock = asyncio.Lock()
+
+seen_ids = OrderedDict.fromkeys(load_json(STATE_FILE, []))
 scheduled_streams = load_json(SCHEDULED_FILE, [])
 
-# --- ASYNC HELPER FUNCTIONS ---
 async def save_state():
     async with state_lock:
         while len(seen_ids) > MAX_HISTORY:
-            seen_ids.pop(next(iter(seen_ids)))
+            seen_ids.popitem(last=False)
         keys_to_save = list(seen_ids.keys())
-        
-    await asyncio.to_thread(save_json, STATE_FILE, keys_to_save)
+    await asyncio.to_thread(save_json_atomic, STATE_FILE, keys_to_save)
 
-async def ensure_twitch_token():
+async def ensure_twitch_token(session):
     global twitch_access_token, twitch_token_expiry
     if not TWITCH_CLIENT_ID or not TWITCH_CLIENT_SECRET:
         return False
@@ -84,48 +85,34 @@ async def ensure_twitch_token():
                     'grant_type': 'client_credentials'
                 }
                 try:
-                    auth_res = await asyncio.to_thread(requests.post, auth_url, data=payload, timeout=10)
-                    auth_data = auth_res.json()
-                    twitch_access_token = auth_data.get('access_token')
-                    if not twitch_access_token:
-                        return False
-                    twitch_token_expiry = time.time() + auth_data.get('expires_in', 0) - 60
+                    async with session.post(auth_url, data=payload, timeout=10) as resp:
+                        resp.raise_for_status()
+                        auth_data = await resp.json()
+                        twitch_access_token = auth_data.get('access_token')
+                        if not twitch_access_token: return False
+                        twitch_token_expiry = time.time() + auth_data.get('expires_in', 0) - 60
                 except Exception as e:
                     logging.error(f"Twitch Auth Error: {e}")
                     return False
     return True
 
-def get_twitch_stream_info_sync(username, token):
-    if not token:
-        return "", ""
-    headers = {'Client-ID': TWITCH_CLIENT_ID, 'Authorization': f"Bearer {token}"}
-    try:
+async def get_twitch_stream_info(username, session):
+    if await ensure_twitch_token(session):
+        headers = {'Client-ID': TWITCH_CLIENT_ID, 'Authorization': f"Bearer {twitch_access_token}"}
         stream_url = f"https://api.twitch.tv/helix/streams?user_login={username}"
-        stream_res = requests.get(stream_url, headers=headers, timeout=10).json()
-        data = stream_res.get('data', [])
-        if data: 
-            return data[0].get('game_name', ""), data[0].get('title', "")
-    except Exception as e:
-        logging.error(f"Twitch API Error: {e}")
+        try:
+            async with session.get(stream_url, headers=headers, timeout=10) as resp:
+                resp.raise_for_status()
+                data = (await resp.json()).get('data', [])
+                if data: 
+                    return data[0].get('game_name', ""), data[0].get('title', "")
+        except Exception as e:
+            logging.error(f"Twitch API Error: {e}")
     return "", ""
 
-async def get_twitch_stream_info(username):
-    if await ensure_twitch_token():
-        return await asyncio.to_thread(get_twitch_stream_info_sync, username, twitch_access_token)
-    return "", ""
-
-def send_telegram_sync(payload):
-    api_url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendPhoto"
-    try:
-        response = requests.post(api_url, json=payload, timeout=15)
-        response.raise_for_status()
-    except Exception as e:
-        logging.error(f"Telegram API Error: {e}")
-
-async def send_telegram_notification(data, prefix, channel_name):
+async def send_telegram_notification(data, prefix, channel_name, session):
     video_id = data.get('id')
     raw_title = data.get('title', 'Unknown Title')
-    
     raw_title = re.sub(r'\s\d{4}-\d{2}-\d{2}\s\d{2}:\d{2}$', '', raw_title)
     
     url = data.get('webpage_url', f"https://www.youtube.com/watch?v={video_id}")    
@@ -133,17 +120,15 @@ async def send_telegram_notification(data, prefix, channel_name):
         match = re.search(r'twitch\.tv/([^/?]+)', url.lower())
         if match:
             username = match.group(1)
-            game_name, twitch_title = await get_twitch_stream_info(username)
+            game_name, twitch_title = await get_twitch_stream_info(username, session)
             if twitch_title: raw_title = twitch_title
             if game_name: raw_title = f"{raw_title} \u2014 {game_name}"
 
     time_str = ""
-    # Prioritize scheduled or actual release time (Deep Extraction keys)
     sched_ts = data.get('scheduled_timestamp') or data.get('release_timestamp')
     actual_ts = data.get('timestamp')
     duration_raw = data.get('duration')
 
-    # If deep extraction found the true start time, use it. Otherwise, use standard upload timestamp.
     if sched_ts:
         start_time_dt = datetime.fromtimestamp(float(sched_ts))
         time_str = f" | Time: {start_time_dt.strftime('%Y-%m-%d %H:%M')}"
@@ -151,7 +136,6 @@ async def send_telegram_notification(data, prefix, channel_name):
         start_time_dt = datetime.fromtimestamp(float(actual_ts))
         time_str = f" | Time: {start_time_dt.strftime('%Y-%m-%d %H:%M')}"
 
-    # Append duration if it's an archive
     base_ts = sched_ts or actual_ts
     if prefix == "VOD ARCHIVE" and duration_raw and base_ts:
         end_ts = float(base_ts) + float(duration_raw)
@@ -185,8 +169,13 @@ async def send_telegram_notification(data, prefix, channel_name):
     
     logging.info(f"Notification queued: {raw_title}")
     
+    api_url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendPhoto"
     async with telegram_lock:
-        await asyncio.to_thread(send_telegram_sync, payload)
+        try:
+            async with session.post(api_url, json=payload, timeout=15) as resp:
+                resp.raise_for_status()
+        except Exception as e:
+            logging.error(f"Telegram API Error: {e}")
         await asyncio.sleep(1.5)
 
 async def fetch_latest_items(target_url, master_cookies_file, m_type=''):
@@ -234,8 +223,7 @@ def check_keywords(text, keywords):
     text_lower = text.lower()
     return any(kw.lower() in text_lower for kw in keywords)
 
-# --- CORE PROCESSING LOGIC ---
-async def process_channel(channel, allowed_tab, cookies_file):
+async def process_channel(channel, allowed_tab, cookies_file, session):
     global scheduled_streams
     state_modified = False
     channel_name = channel.get('name', 'Unknown Channel')
@@ -243,14 +231,10 @@ async def process_channel(channel, allowed_tab, cookies_file):
     keywords = channel.get('keywords', [])
     is_twitch = 'twitch.tv' in base_url.lower()
     
-    if is_twitch and allowed_tab == 'shorts':
-        return
+    if is_twitch and allowed_tab == 'shorts': return
         
     if is_twitch:
-        if allowed_tab in ['videos', 'streams']:
-            target_url = f"{base_url.rstrip('/')}/videos"
-        else:
-            target_url = base_url
+        target_url = f"{base_url.rstrip('/')}/videos" if allowed_tab in ['videos', 'streams'] else base_url
     else:
         target_url = f"{base_url.rstrip('/')}/{allowed_tab}"
         
@@ -263,7 +247,6 @@ async def process_channel(channel, allowed_tab, cookies_file):
 
         live_status = item.get('live_status')
         
-        # 1. UPCOMING STATUS
         if live_status == 'is_upcoming':
             should_notify = False
             async with state_lock:
@@ -273,16 +256,11 @@ async def process_channel(channel, allowed_tab, cookies_file):
                     should_notify = True
                     
             if should_notify:
-                if allowed_tab == 'videos':
-                    prefix = "SCHEDULED - PREMIERE" if keywords else "SCHEDULED - PREMIERE"
-                else:
-                    prefix = "SCHEDULED - Collab" if keywords else f"SCHEDULED - {'Twitch' if is_twitch else 'Youtube'}"
-                    
-                await send_telegram_notification(item, prefix, channel_name)
+                prefix = "SCHEDULED - PREMIERE" if allowed_tab == 'videos' else ("SCHEDULED - Collab" if keywords else f"SCHEDULED - {'Twitch' if is_twitch else 'Youtube'}")
+                await send_telegram_notification(item, prefix, channel_name, session)
                 
                 raw_sched = item.get('scheduled_timestamp') or item.get('release_timestamp')
                 fallback = time.time() + 31536000
-                
                 needs_schedule_save = False
                 schedule_to_save = []
                 
@@ -301,12 +279,10 @@ async def process_channel(channel, allowed_tab, cookies_file):
                         needs_schedule_save = True
                         
                 if needs_schedule_save:
-                    await asyncio.to_thread(save_json, SCHEDULED_FILE, schedule_to_save)
+                    await asyncio.to_thread(save_json_atomic, SCHEDULED_FILE, schedule_to_save)
         
-        # 2. LIVE STATUS
         elif live_status == 'is_live':
-            if is_twitch and '/videos/' in item.get('webpage_url', '').lower():
-                continue
+            if is_twitch and '/videos/' in item.get('webpage_url', '').lower(): continue
 
             should_notify = False
             async with state_lock:
@@ -318,24 +294,17 @@ async def process_channel(channel, allowed_tab, cookies_file):
                     should_notify = True
                     
             if should_notify:
-                # Perform a Deep Extraction to grab release_timestamp (actual start time)
                 rich_item = item
                 if not is_twitch:
                     watch_url = f"https://www.youtube.com/watch?v={v_id}"
-                    logging.info(f"Deep extraction for true start time: {v_id}")
                     try:
                         deep_data = await fetch_latest_items(watch_url, cookies_file, m_type='live')
-                        if deep_data:
-                            rich_item = deep_data[0]
+                        if deep_data: rich_item = deep_data[0]
                     except Exception as e:
                         logging.warning(f"Deep extraction failed, using shallow data: {e}")
 
-                if allowed_tab == 'videos':
-                    prefix = "PREMIERE - Collab" if keywords else "PREMIERE - Youtube"
-                else:
-                    prefix = "LIVE - Collab" if keywords else f"LIVE - {'Twitch' if is_twitch else 'Youtube'}"
-                    
-                await send_telegram_notification(rich_item, prefix, channel_name)
+                prefix = "PREMIERE - " + ("Collab" if keywords else "Youtube") if allowed_tab == 'videos' else ("LIVE - Collab" if keywords else f"LIVE - {'Twitch' if is_twitch else 'Youtube'}")
+                await send_telegram_notification(rich_item, prefix, channel_name, session)
                 
                 needs_schedule_save = False
                 schedule_to_save = []
@@ -348,9 +317,8 @@ async def process_channel(channel, allowed_tab, cookies_file):
                         needs_schedule_save = True
                         
                 if needs_schedule_save:
-                    await asyncio.to_thread(save_json, SCHEDULED_FILE, schedule_to_save)
+                    await asyncio.to_thread(save_json_atomic, SCHEDULED_FILE, schedule_to_save)
                 
-        # 3. PAST / VOD / STANDARD UPLOADS
         else:
             should_notify = False
             prefix_label = ""
@@ -380,19 +348,17 @@ async def process_channel(channel, allowed_tab, cookies_file):
                         prefix_label = "VOD ARCHIVE"
             
             if should_notify:
-                await send_telegram_notification(item, prefix_label, channel_name)
+                await send_telegram_notification(item, prefix_label, channel_name, session)
 
     if state_modified:
         await save_state()
 
-# --- ASYNC WORKERS ---
-async def fast_block_worker(channels, cookies_file, interval):
+async def fast_block_worker(channels, cookies_file, interval, session):
     global scheduled_streams
     yt_main = [c for c in channels if not c.get('keywords')]
     
     while True:
         try:
-            # 1. Snapshot queue in memory
             async with scheduled_lock:
                 current_queue = list(scheduled_streams)
                 
@@ -400,17 +366,14 @@ async def fast_block_worker(channels, cookies_file, interval):
             current_time = time.time()
             streams_to_remove = set()
 
-            # 2. Iterate snapshot outside the lock
             for stream in sorted(current_queue, key=lambda x: x.get('timestamp', 0)):
                 v_id = stream['id']
                 if current_time > stream['timestamp'] + STALE_SCHEDULE_THRESHOLD_SEC:
-                    logging.info(f"Dropping stale stream: {v_id}")
                     streams_to_remove.add(v_id)
                     queue_modified = True
                     continue
 
                 if current_time >= stream['timestamp'] - TARGETED_POLL_PRE_START_SEC:
-                    logging.info(f"Polling targeted schedule: {v_id}")
                     items = await fetch_latest_items(stream['url'], cookies_file, m_type='targeted')
                     if items and items[0].get('live_status') == 'is_live':
                         needs_state_save = False
@@ -435,7 +398,7 @@ async def fast_block_worker(channels, cookies_file, interval):
                             else:
                                 prefix_label = f"LIVE - {'Twitch' if is_twitch else 'Youtube'}"
                                 
-                            await send_telegram_notification(items[0], prefix_label, stream['channel_name'])
+                            await send_telegram_notification(items[0], prefix_label, stream['channel_name'], session)
                                 
                         if needs_state_save:
                             await save_state()
@@ -443,18 +406,16 @@ async def fast_block_worker(channels, cookies_file, interval):
                         streams_to_remove.add(v_id)
                         queue_modified = True
 
-            # 3. Re-acquire lock to apply deletions (preserving concurrent additions)
             if queue_modified:
                 async with scheduled_lock:
                     scheduled_streams = [s for s in scheduled_streams if s['id'] not in streams_to_remove]
                     schedule_to_save = list(scheduled_streams)
-                    
-                await asyncio.to_thread(save_json, SCHEDULED_FILE, schedule_to_save)
+                await asyncio.to_thread(save_json_atomic, SCHEDULED_FILE, schedule_to_save)
 
             tasks = []
             for c in yt_main:
                 if 'live' in c.get('monitor', []):
-                    tasks.append(process_channel(c, 'live', cookies_file))
+                    tasks.append(process_channel(c, 'live', cookies_file, session))
                     
             if tasks: await asyncio.gather(*tasks)
             
@@ -463,7 +424,7 @@ async def fast_block_worker(channels, cookies_file, interval):
             
         await asyncio.sleep(interval)
 
-async def rolling_queue_worker(queue_name, channels, tabs, interval, cookies_file):
+async def rolling_queue_worker(queue_name, channels, tabs, interval, cookies_file, session):
     if not channels: return
     
     execution_queue = []
@@ -473,17 +434,14 @@ async def rolling_queue_worker(queue_name, channels, tabs, interval, cookies_fil
             if t in monitored_tabs:
                 execution_queue.append((c, t))
                 
-    if not execution_queue: 
-        logging.warning(f"No valid tabs to monitor in {queue_name} queue.")
-        return
+    if not execution_queue: return
         
     queue_idx = 0
     while True:
         target_channel, current_tab = execution_queue[queue_idx]
-        
         logging.info(f"{queue_name} Scan ({current_tab}): '{target_channel.get('name')}'")
         try:
-            await process_channel(target_channel, current_tab, cookies_file)
+            await process_channel(target_channel, current_tab, cookies_file, session)
         except Exception as e:
             logging.error(f"{queue_name} Task Error for '{target_channel.get('name')}' on tab '{current_tab}': {e}")
         
@@ -506,13 +464,13 @@ async def main():
 
     logging.info(f"Async Monitor active. Main Interval: {main_interval}s | Collab Interval: {collab_interval}s")
 
-    tasks = [
-        asyncio.create_task(fast_block_worker(channels, cookies_file, live_interval)),
-        asyncio.create_task(rolling_queue_worker("Main", yt_main, ['streams', 'videos', 'shorts'], main_interval, cookies_file)),
-        asyncio.create_task(rolling_queue_worker("Collab", yt_collab, ['live', 'streams', 'videos', 'shorts'], collab_interval, cookies_file))
-    ]
-    
-    await asyncio.gather(*tasks)
+    async with aiohttp.ClientSession() as session:
+        tasks = [
+            asyncio.create_task(fast_block_worker(channels, cookies_file, live_interval, session)),
+            asyncio.create_task(rolling_queue_worker("Main", yt_main, ['streams', 'videos', 'shorts'], main_interval, cookies_file, session)),
+            asyncio.create_task(rolling_queue_worker("Collab", yt_collab, ['live', 'streams', 'videos', 'shorts'], collab_interval, cookies_file, session))
+        ]
+        await asyncio.gather(*tasks)
 
 if __name__ == '__main__':
     asyncio.run(main())
