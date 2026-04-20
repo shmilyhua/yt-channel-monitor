@@ -147,7 +147,7 @@ async def send_telegram_notification(data, prefix, channel_name):
     if sched_ts:
         start_time_dt = datetime.fromtimestamp(float(sched_ts))
         time_str = f" | Time: {start_time_dt.strftime('%Y-%m-%d %H:%M')}"
-    elif actual_ts and prefix in ["VOD ARCHIVE", "VIDEO UPLOAD", "NEW SHORTS"]:
+    elif actual_ts and (prefix in ["VOD ARCHIVE", "VIDEO UPLOAD", "NEW SHORTS"] or "Twitch" in prefix):
         start_time_dt = datetime.fromtimestamp(float(actual_ts))
         time_str = f" | Time: {start_time_dt.strftime('%Y-%m-%d %H:%M')}"
 
