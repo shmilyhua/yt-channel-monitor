@@ -5,7 +5,6 @@ import os
 import html
 import logging
 import re
-import copy
 import aiohttp
 from datetime import datetime
 from collections import OrderedDict
@@ -35,6 +34,7 @@ class YTChannelMonitor:
         self.scheduled_file = config.get('SCHEDULED_FILE', 'scheduled.json')
         self.active_live_file = config.get('ACTIVE_LIVE_FILE', 'active_lives.json')
         self.max_history = config.get('MAX_HISTORY', 1000)
+        self.max_concurrent_scans = config.get('MAX_CONCURRENT_SCANS', 3)
         
         self.telegram_token = config.get('TELEGRAM_TOKEN')
         self.telegram_chat_id = config.get('TELEGRAM_CHAT_ID')
@@ -44,8 +44,12 @@ class YTChannelMonitor:
         self.cookies_file = config.get('COOKIES_FILE', 'www.youtube.com_cookies.txt')
 
         self.seen_ids = OrderedDict.fromkeys(load_json(self.state_file, []))
-        self.scheduled_streams = load_json(self.scheduled_file, [])
-        self.active_lives = load_json(self.active_live_file, [])
+        
+        sched_data = load_json(self.scheduled_file, [])
+        self.scheduled_streams = {s['id']: s for s in sched_data} if isinstance(sched_data, list) else sched_data
+        
+        active_data = load_json(self.active_live_file, [])
+        self.active_lives = {s['id']: s for s in active_data} if isinstance(active_data, list) else active_data
 
         self.twitch_access_token = None
         self.twitch_token_expiry = 0
@@ -55,6 +59,7 @@ class YTChannelMonitor:
         self.scheduled_io_lock = asyncio.Lock()
         self.active_io_lock = asyncio.Lock()
 
+        self.scan_semaphore = asyncio.Semaphore(self.max_concurrent_scans)
         self.notification_queue = asyncio.Queue()
         self.session = None
 
@@ -82,12 +87,12 @@ class YTChannelMonitor:
 
     async def save_scheduled(self):
         async with self.scheduled_io_lock:
-            data = copy.deepcopy(self.scheduled_streams)
+            data = list(self.scheduled_streams.values())
             await asyncio.to_thread(save_json_atomic, self.scheduled_file, data)
 
     async def save_active_lives(self):
         async with self.active_io_lock:
-            data = copy.deepcopy(self.active_lives)
+            data = list(self.active_lives.values())
             await asyncio.to_thread(save_json_atomic, self.active_live_file, data)
 
     async def telegram_worker(self):
@@ -95,10 +100,28 @@ class YTChannelMonitor:
         while True:
             payload = await self.notification_queue.get()
             try:
-                async with self.session.post(api_url, json=payload, timeout=15) as resp:
-                    resp.raise_for_status()
+                while True:
+                    try:
+                        async with self.session.post(api_url, json=payload, timeout=15) as resp:
+                            if resp.status == 429:
+                                retry_after = int(resp.headers.get("Retry-After", 5))
+                                logging.warning(f"Telegram 429 Rate Limit. Sleeping {retry_after}s.")
+                                await asyncio.sleep(retry_after)
+                                continue
+                            if resp.status >= 500:
+                                logging.warning("Telegram 5xx Error. Retrying in 5s.")
+                                await asyncio.sleep(5)
+                                continue
+                            resp.raise_for_status()
+                            break
+                    except asyncio.TimeoutError:
+                        logging.warning("Telegram timeout. Retrying in 5s.")
+                        await asyncio.sleep(5)
+                    except aiohttp.ClientError as e:
+                        logging.error(f"Telegram ClientError: {e}")
+                        break
             except Exception as e:
-                logging.error(f"Telegram API Error: {e}")
+                logging.error(f"Telegram Worker Error: {e}")
             finally:
                 self.notification_queue.task_done()
                 await asyncio.sleep(1.5)
@@ -155,7 +178,7 @@ class YTChannelMonitor:
                 username = match.group(1)
                 game_name, twitch_title = await self.get_twitch_stream_info(username)
                 if twitch_title: raw_title = twitch_title
-                if game_name: raw_title = f"{raw_title} \u2014 {game_name}"
+                if game_name: raw_title = f"{raw_title} — {game_name}"
 
         time_str = ""
         sched_ts = data.get('scheduled_timestamp') or data.get('release_timestamp')
@@ -175,9 +198,9 @@ class YTChannelMonitor:
             end_time_dt = datetime.fromtimestamp(end_ts)
             start_time_dt = datetime.fromtimestamp(float(base_ts))
             if start_time_dt.date() == end_time_dt.date():
-                time_str += f" \u2014 Ended: {end_time_dt.strftime('%H:%M')}"
+                time_str += f" — Ended: {end_time_dt.strftime('%H:%M')}"
             else:
-                time_str += f" \u2014 Ended: {end_time_dt.strftime('%m-%d %H:%M')}"
+                time_str += f" — Ended: {end_time_dt.strftime('%m-%d %H:%M')}"
 
         duration_str = ""
         if duration_raw:
@@ -214,38 +237,35 @@ class YTChannelMonitor:
         
         items = []
         process = None
-        try:
-            process = await asyncio.create_subprocess_exec(
-                *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
-            )
-            stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=60)
-            
-            if stdout:
-                for line in stdout.decode().strip().split('\n'):
-                    if line: items.append(json.loads(line))
-                    
-            if process.returncode != 0 and stderr:
-                error_msg = stderr.decode().strip()
-                if "Sign in to confirm" in error_msg or "cookies" in error_msg.lower():
-                    logging.error(f"CRITICAL: Cookie expired for {target_url}.")
-        except asyncio.TimeoutError:
-            if process and process.returncode is None:
-                try:
-                    process.kill()
-                    await process.wait()
-                except Exception:
-                    pass
-            logging.warning(f"Timeout fetching data for {target_url}")
-        except Exception as e:
-            logging.error(f"Async execution error for {target_url}: {e}")
-        finally:
-            if process and process.returncode is None:
-                try:
-                    process.kill()
-                    await process.wait()
-                except Exception:
-                    pass
+        async with self.scan_semaphore:
+            try:
+                process = await asyncio.create_subprocess_exec(
+                    *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+                )
+                stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=60)
                 
+                if stdout:
+                    for line in stdout.decode().strip().split('\n'):
+                        if line: items.append(json.loads(line))
+                        
+                if process.returncode != 0 and stderr:
+                    error_msg = stderr.decode().strip()
+                    if "Sign in to confirm" in error_msg or "cookies" in error_msg.lower():
+                        logging.error(f"CRITICAL: Cookie expired for {target_url}.")
+            except asyncio.TimeoutError:
+                logging.warning(f"Timeout fetching data for {target_url}")
+            except Exception as e:
+                logging.error(f"Async execution error for {target_url}: {e}")
+            finally:
+                if process and process.returncode is None:
+                    try:
+                        process.kill()
+                        await process.communicate()
+                    except ProcessLookupError:
+                        pass
+                    except Exception as e:
+                        logging.error(f"Process kill error: {e}")
+                    
         return items
 
     def check_keywords(self, text, keywords):
@@ -290,8 +310,8 @@ class YTChannelMonitor:
                     raw_sched = item.get('scheduled_timestamp') or item.get('release_timestamp')
                     fallback = time.time() + 31536000
                     
-                    if not any(s['id'] == v_id for s in self.scheduled_streams):
-                        self.scheduled_streams.append({
+                    if v_id not in self.scheduled_streams:
+                        self.scheduled_streams[v_id] = {
                             'id': v_id,
                             'url': item.get('webpage_url', f"https://www.youtube.com/watch?v={v_id}"),
                             'timestamp': float(raw_sched) if raw_sched else fallback,
@@ -299,7 +319,7 @@ class YTChannelMonitor:
                             'is_collab': bool(keywords),
                             'is_twitch': is_twitch,
                             'is_premiere': allowed_tab == 'videos'
-                        })
+                        }
                         await self.save_scheduled()
             
             elif live_status == 'is_live':
@@ -326,19 +346,18 @@ class YTChannelMonitor:
                     prefix = "PREMIERE - " + ("Collab" if keywords else "Youtube") if allowed_tab == 'videos' else ("LIVE - Collab" if keywords else f"LIVE - {'Twitch' if is_twitch else 'Youtube'}")
                     await self.queue_notification(rich_item, prefix, channel_name)
                     
-                    original_len = len(self.scheduled_streams)
-                    self.scheduled_streams = [s for s in self.scheduled_streams if s['id'] != v_id]
-                    if len(self.scheduled_streams) < original_len:
+                    if v_id in self.scheduled_streams:
+                        self.scheduled_streams.pop(v_id, None)
                         await self.save_scheduled()
                         
-                    if not any(s['id'] == v_id for s in self.active_lives):
-                        self.active_lives.append({
+                    if v_id not in self.active_lives:
+                        self.active_lives[v_id] = {
                             'id': v_id,
                             'url': f"https://www.youtube.com/watch?v={v_id}" if not is_twitch else base_url,
                             'timestamp': time.time(),
                             'channel_name': channel_name,
                             'is_twitch': is_twitch
-                        })
+                        }
                         await self.save_active_lives()
             
             else:
@@ -371,9 +390,8 @@ class YTChannelMonitor:
                 if should_notify:
                     await self.queue_notification(item, prefix_label, channel_name)
                     
-                    original_len = len(self.scheduled_streams)
-                    self.scheduled_streams = [s for s in self.scheduled_streams if s['id'] != v_id]
-                    if len(self.scheduled_streams) < original_len:
+                    if v_id in self.scheduled_streams:
+                        self.scheduled_streams.pop(v_id, None)
                         await self.save_scheduled()
 
         if state_modified:
@@ -390,22 +408,23 @@ class YTChannelMonitor:
             try:
                 current_time = time.time()
                 
-                stale_streams = [s['id'] for s in self.scheduled_streams if current_time > s['timestamp'] + STALE_SCHEDULE_THRESHOLD_SEC]
-                if stale_streams:
-                    self.scheduled_streams = [s for s in self.scheduled_streams if s['id'] not in stale_streams]
+                stale_keys = [k for k, s in self.scheduled_streams.items() if current_time > s['timestamp'] + STALE_SCHEDULE_THRESHOLD_SEC]
+                if stale_keys:
+                    for k in stale_keys:
+                        self.scheduled_streams.pop(k, None)
                     await self.save_scheduled()
                 
                 dynamic_queue = []
                 for c in yt_main_live:
                     dynamic_queue.append({'type': 'channel', 'data': c})
                     
-                for s in self.scheduled_streams:
+                for s in self.scheduled_streams.values():
                     if current_time >= s['timestamp'] - TARGETED_POLL_PRE_START_SEC:
                         dynamic_queue.append({'type': 'scheduled', 'data': s})
                             
                 if not dynamic_queue:
                     elapsed = time.time() - start_time
-                    await asyncio.sleep(max(0, interval - elapsed))
+                    await asyncio.sleep(max(5.0, interval - elapsed))
                     continue
                     
                 if queue_idx >= len(dynamic_queue):
@@ -446,17 +465,17 @@ class YTChannelMonitor:
                         if needs_state_save:
                             await self.save_state()
                             
-                        self.scheduled_streams = [s for s in self.scheduled_streams if s['id'] != v_id]
+                        self.scheduled_streams.pop(v_id, None)
                         await self.save_scheduled()
                             
-                        if not any(s['id'] == v_id for s in self.active_lives):
-                            self.active_lives.append({
+                        if v_id not in self.active_lives:
+                            self.active_lives[v_id] = {
                                 'id': v_id,
                                 'url': stream['url'],
                                 'timestamp': time.time(),
                                 'channel_name': stream['channel_name'],
                                 'is_twitch': stream.get('is_twitch', False)
-                            })
+                            }
                             await self.save_active_lives()
                                 
                 elif current_item['type'] == 'channel':
@@ -469,7 +488,7 @@ class YTChannelMonitor:
                 
             queue_idx += 1
             elapsed = time.time() - start_time
-            await asyncio.sleep(max(0, interval - elapsed))
+            await asyncio.sleep(max(5.0, interval - elapsed))
 
     async def rolling_queue_worker(self, queue_name, channels, tabs, interval):
         if not channels: return
@@ -490,7 +509,7 @@ class YTChannelMonitor:
                 dynamic_queue = list(static_queue)
                 
                 if queue_name == "Main":
-                    for s in self.active_lives:
+                    for s in list(self.active_lives.values()):
                         dynamic_queue.append({'type': 'active_live', 'data': s})
                         
                 if queue_idx >= len(dynamic_queue):
@@ -504,7 +523,7 @@ class YTChannelMonitor:
                     logging.info(f"{queue_name} Scan (active_live): '{stream.get('channel_name')}'")
                     
                     if time.time() > stream['timestamp'] + 10800:
-                        self.active_lives = [s for s in self.active_lives if s['id'] != v_id]
+                        self.active_lives.pop(v_id, None)
                         await self.save_active_lives()
                     else:
                         items = await self.fetch_latest_items(stream['url'], m_type='targeted')
@@ -523,11 +542,11 @@ class YTChannelMonitor:
                                 if needs_state_save:
                                     await self.save_state()
                                     
-                                self.active_lives = [s for s in self.active_lives if s['id'] != v_id]
+                                self.active_lives.pop(v_id, None)
                                 await self.save_active_lives()
                         else:
                             if stream.get('is_twitch'):
-                                self.active_lives = [s for s in self.active_lives if s['id'] != v_id]
+                                self.active_lives.pop(v_id, None)
                                 await self.save_active_lives()
                 else:
                     target_channel, current_tab = current_item
@@ -539,7 +558,7 @@ class YTChannelMonitor:
             
             queue_idx += 1
             elapsed = time.time() - start_time
-            await asyncio.sleep(max(0, interval - elapsed))
+            await asyncio.sleep(max(5.0, interval - elapsed))
 
     async def run(self):
         channels = self.config.get('CHANNELS', [])
