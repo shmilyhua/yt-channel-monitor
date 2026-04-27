@@ -31,6 +31,7 @@ config = load_json(CONFIG_FILE, {})
 LOG_FILE = config.get('LOG_FILE', 'monitor.log')
 STATE_FILE = config.get('STATE_FILE', 'seen_ids.json')
 SCHEDULED_FILE = config.get('SCHEDULED_FILE', 'scheduled.json')
+ACTIVE_LIVE_FILE = config.get('ACTIVE_LIVE_FILE', 'active_lives.json')
 MAX_HISTORY = config.get('MAX_HISTORY', 1000)
 
 logging.basicConfig(
@@ -49,7 +50,7 @@ TWITCH_CLIENT_ID = config.get('TWITCH_CLIENT_ID')
 TWITCH_CLIENT_SECRET = config.get('TWITCH_CLIENT_SECRET')
 FREE_CHAT_ID = config.get('FREE_CHAT_ID', '')
 
-STALE_SCHEDULE_THRESHOLD_SEC = 21600
+STALE_SCHEDULE_THRESHOLD_SEC = 10800
 TARGETED_POLL_PRE_START_SEC = 300
 
 twitch_access_token = None
@@ -57,11 +58,13 @@ twitch_token_expiry = 0
 
 state_lock = asyncio.Lock()
 scheduled_lock = asyncio.Lock()
+active_lives_lock = asyncio.Lock()
 telegram_lock = asyncio.Lock()
 twitch_auth_lock = asyncio.Lock()
 
 seen_ids = OrderedDict.fromkeys(load_json(STATE_FILE, []))
 scheduled_streams = load_json(SCHEDULED_FILE, [])
+active_lives = load_json(ACTIVE_LIVE_FILE, [])
 
 async def save_state():
     async with state_lock:
@@ -224,7 +227,7 @@ def check_keywords(text, keywords):
     return any(kw.lower() in text_lower for kw in keywords)
 
 async def process_channel(channel, allowed_tab, cookies_file, session):
-    global scheduled_streams
+    global scheduled_streams, active_lives
     state_modified = False
     channel_name = channel.get('name', 'Unknown Channel')
     base_url = channel.get('url')
@@ -318,6 +321,17 @@ async def process_channel(channel, allowed_tab, cookies_file, session):
                         
                 if needs_schedule_save:
                     await asyncio.to_thread(save_json_atomic, SCHEDULED_FILE, schedule_to_save)
+                    
+                async with active_lives_lock:
+                    if not any(s['id'] == v_id for s in active_lives):
+                        active_lives.append({
+                            'id': v_id,
+                            'url': f"https://www.youtube.com/watch?v={v_id}" if not is_twitch else base_url,
+                            'timestamp': time.time(),
+                            'channel_name': channel_name,
+                            'is_twitch': is_twitch
+                        })
+                        await asyncio.to_thread(save_json_atomic, ACTIVE_LIVE_FILE, list(active_lives))
                 
         else:
             should_notify = False
@@ -349,103 +363,184 @@ async def process_channel(channel, allowed_tab, cookies_file, session):
             
             if should_notify:
                 await send_telegram_notification(item, prefix_label, channel_name, session)
+                
+                async with scheduled_lock:
+                    original_len = len(scheduled_streams)
+                    scheduled_streams = [s for s in scheduled_streams if s['id'] != v_id]
+                    if len(scheduled_streams) < original_len:
+                        await asyncio.to_thread(save_json_atomic, SCHEDULED_FILE, list(scheduled_streams))
 
     if state_modified:
         await save_state()
 
 async def fast_block_worker(channels, cookies_file, interval, session):
-    global scheduled_streams
-    yt_main = [c for c in channels if not c.get('keywords')]
+    global scheduled_streams, active_lives
     
+    yt_main_live = [c for c in channels if not c.get('keywords') and 'live' in c.get('monitor', [])]
+    
+    queue_idx = 0
     while True:
         try:
-            async with scheduled_lock:
-                current_queue = list(scheduled_streams)
-                
-            queue_modified = False
             current_time = time.time()
-            streams_to_remove = set()
-
-            for stream in sorted(current_queue, key=lambda x: x.get('timestamp', 0)):
-                v_id = stream['id']
-                if current_time > stream['timestamp'] + STALE_SCHEDULE_THRESHOLD_SEC:
-                    streams_to_remove.add(v_id)
-                    queue_modified = True
-                    continue
-
-                if current_time >= stream['timestamp'] - TARGETED_POLL_PRE_START_SEC:
-                    items = await fetch_latest_items(stream['url'], cookies_file, m_type='targeted')
-                    if items and items[0].get('live_status') == 'is_live':
-                        needs_state_save = False
-                        should_notify_targeted = False
-                        
-                        async with state_lock:
-                            if f"{v_id}_live" not in seen_ids:
-                                seen_ids[f"{v_id}_live"] = None
-                                seen_ids.pop(f"{v_id}_scheduled", None)
-                                needs_state_save = True
-                                should_notify_targeted = True
-                                
-                        if should_notify_targeted:
-                            is_collab = stream.get('is_collab', False)
-                            is_twitch = stream.get('is_twitch', False)
-                            is_premiere = stream.get('is_premiere', False)
-                            
-                            if is_premiere:
-                                prefix_label = "PREMIERE - Collab" if is_collab else "PREMIERE - Youtube"
-                            elif is_collab:
-                                prefix_label = "LIVE - Collab"
-                            else:
-                                prefix_label = f"LIVE - {'Twitch' if is_twitch else 'Youtube'}"
-                                
-                            await send_telegram_notification(items[0], prefix_label, stream['channel_name'], session)
-                                
-                        if needs_state_save:
-                            await save_state()
-                            
-                        streams_to_remove.add(v_id)
-                        queue_modified = True
-
-            if queue_modified:
-                async with scheduled_lock:
-                    scheduled_streams = [s for s in scheduled_streams if s['id'] not in streams_to_remove]
-                    schedule_to_save = list(scheduled_streams)
-                await asyncio.to_thread(save_json_atomic, SCHEDULED_FILE, schedule_to_save)
-
-            tasks = []
-            for c in yt_main:
-                if 'live' in c.get('monitor', []):
-                    tasks.append(process_channel(c, 'live', cookies_file, session))
-                    
-            if tasks: await asyncio.gather(*tasks)
             
+            async with scheduled_lock:
+                stale_streams = [s['id'] for s in scheduled_streams if current_time > s['timestamp'] + STALE_SCHEDULE_THRESHOLD_SEC]
+                if stale_streams:
+                    scheduled_streams = [s for s in scheduled_streams if s['id'] not in stale_streams]
+                    await asyncio.to_thread(save_json_atomic, SCHEDULED_FILE, list(scheduled_streams))
+            
+            dynamic_queue = []
+            for c in yt_main_live:
+                dynamic_queue.append({'type': 'channel', 'data': c})
+                
+            async with scheduled_lock:
+                for s in scheduled_streams:
+                    if current_time >= s['timestamp'] - TARGETED_POLL_PRE_START_SEC:
+                        dynamic_queue.append({'type': 'scheduled', 'data': s})
+                        
+            if not dynamic_queue:
+                await asyncio.sleep(interval)
+                continue
+                
+            if queue_idx >= len(dynamic_queue):
+                queue_idx = 0
+                
+            current_item = dynamic_queue[queue_idx]
+            
+            if current_item['type'] == 'scheduled':
+                stream = current_item['data']
+                v_id = stream['id']
+                logging.info(f"Fast Scan (scheduled): '{stream.get('channel_name')}'")
+                
+                items = await fetch_latest_items(stream['url'], cookies_file, m_type='targeted')
+                if items and items[0].get('live_status') == 'is_live':
+                    needs_state_save = False
+                    should_notify_targeted = False
+                    
+                    async with state_lock:
+                        if f"{v_id}_live" not in seen_ids:
+                            seen_ids[f"{v_id}_live"] = None
+                            seen_ids.pop(f"{v_id}_scheduled", None)
+                            needs_state_save = True
+                            should_notify_targeted = True
+                            
+                    if should_notify_targeted:
+                        is_collab = stream.get('is_collab', False)
+                        is_twitch = stream.get('is_twitch', False)
+                        is_premiere = stream.get('is_premiere', False)
+                        
+                        if is_premiere:
+                            prefix_label = "PREMIERE - Collab" if is_collab else "PREMIERE - Youtube"
+                        elif is_collab:
+                            prefix_label = "LIVE - Collab"
+                        else:
+                            prefix_label = f"LIVE - {'Twitch' if is_twitch else 'Youtube'}"
+                            
+                        await send_telegram_notification(items[0], prefix_label, stream['channel_name'], session)
+                            
+                    if needs_state_save:
+                        await save_state()
+                        
+                    async with scheduled_lock:
+                        scheduled_streams = [s for s in scheduled_streams if s['id'] != v_id]
+                        await asyncio.to_thread(save_json_atomic, SCHEDULED_FILE, list(scheduled_streams))
+                        
+                    async with active_lives_lock:
+                        if not any(s['id'] == v_id for s in active_lives):
+                            active_lives.append({
+                                'id': v_id,
+                                'url': stream['url'],
+                                'timestamp': time.time(),
+                                'channel_name': stream['channel_name'],
+                                'is_twitch': stream.get('is_twitch', False)
+                            })
+                            await asyncio.to_thread(save_json_atomic, ACTIVE_LIVE_FILE, list(active_lives))
+                            
+            elif current_item['type'] == 'channel':
+                target_channel = current_item['data']
+                logging.info(f"Fast Scan (live): '{target_channel.get('name')}'")
+                await process_channel(target_channel, 'live', cookies_file, session)
+
         except Exception as e:
             logging.error(f"Fast Block Error: {e}")
             
+        queue_idx += 1
         await asyncio.sleep(interval)
 
 async def rolling_queue_worker(queue_name, channels, tabs, interval, cookies_file, session):
+    global active_lives
     if not channels: return
     
-    execution_queue = []
+    static_queue = []
     for c in channels:
         monitored_tabs = c.get('monitor', ['streams'])
         for t in tabs:
             if t in monitored_tabs:
-                execution_queue.append((c, t))
+                static_queue.append((c, t))
                 
-    if not execution_queue: return
+    if not static_queue: return
         
     queue_idx = 0
     while True:
-        target_channel, current_tab = execution_queue[queue_idx]
-        logging.info(f"{queue_name} Scan ({current_tab}): '{target_channel.get('name')}'")
-        try:
-            await process_channel(target_channel, current_tab, cookies_file, session)
-        except Exception as e:
-            logging.error(f"{queue_name} Task Error for '{target_channel.get('name')}' on tab '{current_tab}': {e}")
+        dynamic_queue = list(static_queue)
         
-        queue_idx = (queue_idx + 1) % len(execution_queue)
+        if queue_name == "Main":
+            async with active_lives_lock:
+                for s in active_lives:
+                    dynamic_queue.append({'type': 'active_live', 'data': s})
+                    
+        if queue_idx >= len(dynamic_queue):
+            queue_idx = 0
+            
+        current_item = dynamic_queue[queue_idx]
+        
+        if isinstance(current_item, dict) and current_item.get('type') == 'active_live':
+            stream = current_item['data']
+            v_id = stream['id']
+            logging.info(f"{queue_name} Scan (active_live): '{stream.get('channel_name')}'")
+            
+            if time.time() > stream['timestamp'] + 10800:
+                async with active_lives_lock:
+                    active_lives[:] = [s for s in active_lives if s['id'] != v_id]
+                    await asyncio.to_thread(save_json_atomic, ACTIVE_LIVE_FILE, list(active_lives))
+            else:
+                try:
+                    items = await fetch_latest_items(stream['url'], cookies_file, m_type='targeted')
+                    if items:
+                        live_status = items[0].get('live_status')
+                        if live_status == 'was_live' or (live_status is None and items[0].get('duration')):
+                            needs_state_save = False
+                            should_notify_vod = False
+                            async with state_lock:
+                                if f"{v_id}_vod" not in seen_ids:
+                                    seen_ids[f"{v_id}_vod"] = None
+                                    seen_ids.pop(f"{v_id}_live", None)
+                                    needs_state_save = True
+                                    should_notify_vod = True
+                            if should_notify_vod:
+                                await send_telegram_notification(items[0], "VOD ARCHIVE", stream['channel_name'], session)
+                            if needs_state_save:
+                                await save_state()
+                                
+                            async with active_lives_lock:
+                                active_lives[:] = [s for s in active_lives if s['id'] != v_id]
+                                await asyncio.to_thread(save_json_atomic, ACTIVE_LIVE_FILE, list(active_lives))
+                    else:
+                        if stream.get('is_twitch'):
+                            async with active_lives_lock:
+                                active_lives[:] = [s for s in active_lives if s['id'] != v_id]
+                                await asyncio.to_thread(save_json_atomic, ACTIVE_LIVE_FILE, list(active_lives))
+                except Exception as e:
+                    logging.error(f"Integrated Live Finish Error: {e}")
+        else:
+            target_channel, current_tab = current_item
+            logging.info(f"{queue_name} Scan ({current_tab}): '{target_channel.get('name')}'")
+            try:
+                await process_channel(target_channel, current_tab, cookies_file, session)
+            except Exception as e:
+                logging.error(f"{queue_name} Task Error for '{target_channel.get('name')}' on tab '{current_tab}': {e}")
+        
+        queue_idx += 1
         await asyncio.sleep(interval)
 
 async def main():
