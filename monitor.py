@@ -572,7 +572,10 @@ class YTChannelMonitor:
                         items = await self.fetch_latest_items(stream['url'], m_type='targeted')
                         if items:
                             live_status = items[0].get('live_status')
-                            if live_status == 'was_live' or (live_status is None and items[0].get('duration')):
+                            if live_status == 'is_live':
+                                stream['timestamp'] = time.time()
+                                stream['failures'] = 0
+                            elif live_status == 'was_live' or (live_status is None and items[0].get('duration')):
                                 needs_state_save = False
                                 should_notify_vod = False
                                 if f"{v_id}_vod" not in self.seen_ids:
@@ -588,8 +591,10 @@ class YTChannelMonitor:
                                 self.active_lives.pop(v_id, None)
                                 await self.save_active_lives()
                         else:
-                            self.active_lives.pop(v_id, None)
-                            await self.save_active_lives()
+                            stream['failures'] = stream.get('failures', 0) + 1
+                            if stream['failures'] >= 3:
+                                self.active_lives.pop(v_id, None)
+                                await self.save_active_lives()
                 else:
                     target_channel, current_tab = current_item
                     logging.info(f"{queue_name} Scan ({current_tab}): '{target_channel.get('name')}'")
