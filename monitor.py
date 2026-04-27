@@ -39,6 +39,7 @@ class YTChannelMonitor:
         
         self.telegram_token = config.get('TELEGRAM_TOKEN')
         self.telegram_chat_id = config.get('TELEGRAM_CHAT_ID')
+        self.telegram_admin_id = config.get('TELEGRAM_ADMIN_ID', self.telegram_chat_id)
         self.twitch_client_id = config.get('TWITCH_CLIENT_ID')
         self.twitch_client_secret = config.get('TWITCH_CLIENT_SECRET')
         self.free_chat_id = config.get('FREE_CHAT_ID', '')
@@ -64,6 +65,7 @@ class YTChannelMonitor:
         self.scan_semaphore = asyncio.Semaphore(self.max_concurrent_scans)
         self.notification_queue = asyncio.Queue()
         self.session = None
+        self.cookies_valid = True
 
         logging.basicConfig(
             level=logging.INFO,
@@ -101,9 +103,10 @@ class YTChannelMonitor:
             await asyncio.to_thread(write_string_atomic, self.active_live_file, json_str)
 
     async def telegram_worker(self):
-        api_url = f"https://api.telegram.org/bot{self.telegram_token}/sendPhoto"
         while True:
             payload = await self.notification_queue.get()
+            api_endpoint = "sendMessage" if 'text' in payload else "sendPhoto"
+            api_url = f"https://api.telegram.org/bot{self.telegram_token}/{api_endpoint}"
             retries = 0
             max_retries = 3
             try:
@@ -131,7 +134,9 @@ class YTChannelMonitor:
                         logging.error(f"Telegram ClientError: {e}")
                         break
                 if retries >= max_retries:
-                    logging.error("Telegram payload dropped after max retries.")
+                    logging.error("Telegram payload failed max retries. Re-queueing with penalty.")
+                    await asyncio.sleep(30)
+                    await self.notification_queue.put(payload)
             except Exception as e:
                 logging.error(f"Telegram Worker Error: {e}")
             finally:
@@ -249,7 +254,7 @@ class YTChannelMonitor:
         items_range = '1-3' if m_type == 'streams' else ('1' if m_type in ['live', 'targeted'] else '1-2')
         cmd = ['yt-dlp', '-j', '--no-warnings', '--playlist-items', items_range, '--ignore-no-formats-error']
         
-        if self.cookies_file and os.path.exists(self.cookies_file):
+        if self.cookies_file and os.path.exists(self.cookies_file) and self.cookies_valid:
             cmd.extend(['--cookies', self.cookies_file])
             
         cmd.append(target_url)
@@ -274,7 +279,14 @@ class YTChannelMonitor:
                 if process.returncode != 0 and stderr:
                     error_msg = stderr.decode().strip()
                     if "Sign in to confirm" in error_msg or "cookies" in error_msg.lower():
-                        logging.error(f"CRITICAL: Cookie expired for {target_url}.")
+                        if self.cookies_valid:
+                            self.cookies_valid = False
+                            logging.error(f"CRITICAL: Cookie expired for {target_url}. Disabling cookie usage.")
+                            await self.notification_queue.put({
+                                'chat_id': self.telegram_admin_id,
+                                'text': '⚠️ <b>CRITICAL: YouTube cookies expired.</b>\nManual replacement of cookies.txt required to resume restricted scanning.',
+                                'parse_mode': 'HTML'
+                            })
             except asyncio.TimeoutError:
                 logging.warning(f"Timeout fetching data for {target_url}")
             except Exception as e:
@@ -364,7 +376,7 @@ class YTChannelMonitor:
                         watch_url = f"https://www.youtube.com/watch?v={v_id}"
                         try:
                             deep_data = await self.fetch_latest_items(watch_url, m_type='live')
-                            if deep_data: rich_item = deep_data[0]
+                            if deep_data: rich_item.update(deep_data[0])
                         except Exception as e:
                             logging.warning(f"Deep extraction failed, using shallow data: {e}")
 
