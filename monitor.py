@@ -5,6 +5,7 @@ import os
 import html
 import logging
 import re
+import copy
 import aiohttp
 from datetime import datetime
 from collections import OrderedDict
@@ -20,10 +21,10 @@ def load_json(filepath, default):
         except json.JSONDecodeError:
             return default
 
-def save_json_atomic(filepath, data):
+def write_string_atomic(filepath, data_str):
     tmp_path = f"{filepath}.tmp"
     with open(tmp_path, 'w', encoding='utf-8') as f:
-        json.dump(data, f, indent=2)
+        f.write(data_str)
     os.replace(tmp_path, filepath)
 
 class YTChannelMonitor:
@@ -54,6 +55,7 @@ class YTChannelMonitor:
         self.twitch_access_token = None
         self.twitch_token_expiry = 0
         self.twitch_auth_lock = asyncio.Lock()
+        self.twitch_cache = {}  # {username: (game_name, title, expiry_timestamp)}
         
         self.state_io_lock = asyncio.Lock()
         self.scheduled_io_lock = asyncio.Lock()
@@ -83,17 +85,20 @@ class YTChannelMonitor:
     async def save_state(self):
         async with self.state_io_lock:
             keys_to_save = list(self.seen_ids.keys())
-            await asyncio.to_thread(save_json_atomic, self.state_file, keys_to_save)
+            json_str = json.dumps(keys_to_save, indent=2)
+            await asyncio.to_thread(write_string_atomic, self.state_file, json_str)
 
     async def save_scheduled(self):
         async with self.scheduled_io_lock:
             data = list(self.scheduled_streams.values())
-            await asyncio.to_thread(save_json_atomic, self.scheduled_file, data)
+            json_str = json.dumps(data, indent=2)
+            await asyncio.to_thread(write_string_atomic, self.scheduled_file, json_str)
 
     async def save_active_lives(self):
         async with self.active_io_lock:
             data = list(self.active_lives.values())
-            await asyncio.to_thread(save_json_atomic, self.active_live_file, data)
+            json_str = json.dumps(data, indent=2)
+            await asyncio.to_thread(write_string_atomic, self.active_live_file, json_str)
 
     async def telegram_worker(self):
         api_url = f"https://api.telegram.org/bot{self.telegram_token}/sendPhoto"
@@ -153,6 +158,10 @@ class YTChannelMonitor:
         return True
 
     async def get_twitch_stream_info(self, username):
+        now = time.time()
+        if username in self.twitch_cache and now < self.twitch_cache[username][2]:
+            return self.twitch_cache[username][0], self.twitch_cache[username][1]
+
         if await self.ensure_twitch_token():
             headers = {'Client-ID': self.twitch_client_id, 'Authorization': f"Bearer {self.twitch_access_token}"}
             stream_url = f"https://api.twitch.tv/helix/streams?user_login={username}"
@@ -161,7 +170,10 @@ class YTChannelMonitor:
                     resp.raise_for_status()
                     data = (await resp.json()).get('data', [])
                     if data: 
-                        return data[0].get('game_name', ""), data[0].get('title', "")
+                        game_name = data[0].get('game_name', "")
+                        title = data[0].get('title', "")
+                        self.twitch_cache[username] = (game_name, title, now + 300)
+                        return game_name, title
             except Exception as e:
                 logging.error(f"Twitch API Error: {e}")
         return "", ""
@@ -260,7 +272,7 @@ class YTChannelMonitor:
                 if process and process.returncode is None:
                     try:
                         process.kill()
-                        await process.communicate()
+                        await process.wait()
                     except ProcessLookupError:
                         pass
                     except Exception as e:
@@ -308,19 +320,21 @@ class YTChannelMonitor:
                     await self.queue_notification(item, prefix, channel_name)
                     
                     raw_sched = item.get('scheduled_timestamp') or item.get('release_timestamp')
-                    fallback = time.time() + 31536000
                     
-                    if v_id not in self.scheduled_streams:
-                        self.scheduled_streams[v_id] = {
-                            'id': v_id,
-                            'url': item.get('webpage_url', f"https://www.youtube.com/watch?v={v_id}"),
-                            'timestamp': float(raw_sched) if raw_sched else fallback,
-                            'channel_name': channel_name,
-                            'is_collab': bool(keywords),
-                            'is_twitch': is_twitch,
-                            'is_premiere': allowed_tab == 'videos'
-                        }
-                        await self.save_scheduled()
+                    # If it lacks a timestamp, we rely on the rolling queue to catch it when it goes live.
+                    if raw_sched:
+                        if v_id not in self.scheduled_streams:
+                            self.scheduled_streams[v_id] = {
+                                'id': v_id,
+                                'url': item.get('webpage_url', f"https://www.youtube.com/watch?v={v_id}"),
+                                'timestamp': float(raw_sched),
+                                'channel_name': channel_name,
+                                'is_collab': bool(keywords),
+                                'is_twitch': is_twitch,
+                                'is_premiere': allowed_tab == 'videos',
+                                'added_at': time.time()
+                            }
+                            await self.save_scheduled()
             
             elif live_status == 'is_live':
                 if is_twitch and '/videos/' in item.get('webpage_url', '').lower(): continue
@@ -400,6 +414,8 @@ class YTChannelMonitor:
     async def fast_block_worker(self, channels, interval):
         STALE_SCHEDULE_THRESHOLD_SEC = 10800
         TARGETED_POLL_PRE_START_SEC = 300
+        MAX_SCHEDULE_RETENTION_SEC = 86400 * 7 # Fallback retention: 7 days
+        
         yt_main_live = [c for c in channels if not c.get('keywords') and 'live' in c.get('monitor', [])]
         queue_idx = 0
         
@@ -408,7 +424,11 @@ class YTChannelMonitor:
             try:
                 current_time = time.time()
                 
-                stale_keys = [k for k, s in self.scheduled_streams.items() if current_time > s['timestamp'] + STALE_SCHEDULE_THRESHOLD_SEC]
+                stale_keys = [
+                    k for k, s in self.scheduled_streams.items() 
+                    if (current_time > s['timestamp'] + STALE_SCHEDULE_THRESHOLD_SEC) or 
+                       (current_time > s.get('added_at', current_time) + MAX_SCHEDULE_RETENTION_SEC)
+                ]
                 if stale_keys:
                     for k in stale_keys:
                         self.scheduled_streams.pop(k, None)
