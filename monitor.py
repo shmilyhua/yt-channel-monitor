@@ -104,27 +104,34 @@ class YTChannelMonitor:
         api_url = f"https://api.telegram.org/bot{self.telegram_token}/sendPhoto"
         while True:
             payload = await self.notification_queue.get()
+            retries = 0
+            max_retries = 3
             try:
-                while True:
+                while retries < max_retries:
                     try:
                         async with self.session.post(api_url, json=payload, timeout=15) as resp:
                             if resp.status == 429:
                                 retry_after = int(resp.headers.get("Retry-After", 5))
-                                logging.warning(f"Telegram 429 Rate Limit. Sleeping {retry_after}s.")
+                                logging.warning(f"Telegram 429 Rate Limit. Sleeping {retry_after}s. (Attempt {retries+1}/{max_retries})")
                                 await asyncio.sleep(retry_after)
+                                retries += 1
                                 continue
                             if resp.status >= 500:
-                                logging.warning("Telegram 5xx Error. Retrying in 5s.")
+                                logging.warning(f"Telegram 5xx Error. Retrying in 5s. (Attempt {retries+1}/{max_retries})")
                                 await asyncio.sleep(5)
+                                retries += 1
                                 continue
                             resp.raise_for_status()
                             break
                     except asyncio.TimeoutError:
-                        logging.warning("Telegram timeout. Retrying in 5s.")
+                        logging.warning(f"Telegram timeout. Retrying in 5s. (Attempt {retries+1}/{max_retries})")
                         await asyncio.sleep(5)
+                        retries += 1
                     except aiohttp.ClientError as e:
                         logging.error(f"Telegram ClientError: {e}")
                         break
+                if retries >= max_retries:
+                    logging.error("Telegram payload dropped after max retries.")
             except Exception as e:
                 logging.error(f"Telegram Worker Error: {e}")
             finally:
@@ -258,7 +265,11 @@ class YTChannelMonitor:
                 
                 if stdout:
                     for line in stdout.decode().strip().split('\n'):
-                        if line: items.append(json.loads(line))
+                        if line:
+                            try:
+                                items.append(json.loads(line))
+                            except json.JSONDecodeError:
+                                logging.warning(f"Malformed JSON from yt-dlp: {line[:50]}")
                         
                 if process.returncode != 0 and stderr:
                     error_msg = stderr.decode().strip()
@@ -565,9 +576,8 @@ class YTChannelMonitor:
                                 self.active_lives.pop(v_id, None)
                                 await self.save_active_lives()
                         else:
-                            if stream.get('is_twitch'):
-                                self.active_lives.pop(v_id, None)
-                                await self.save_active_lives()
+                            self.active_lives.pop(v_id, None)
+                            await self.save_active_lives()
                 else:
                     target_channel, current_tab = current_item
                     logging.info(f"{queue_name} Scan ({current_tab}): '{target_channel.get('name')}'")
