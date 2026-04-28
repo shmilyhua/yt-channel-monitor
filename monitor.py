@@ -384,19 +384,20 @@ class YTChannelMonitor:
                     prefix = "PREMIERE - " + ("Collab" if keywords else "Youtube") if allowed_tab == 'videos' else ("LIVE - Collab" if keywords else f"LIVE - {'Twitch' if is_twitch else 'Youtube'}")
                     await self.queue_notification(rich_item, prefix, channel_name)
                     
-                    if v_id in self.scheduled_streams:
-                        self.scheduled_streams.pop(v_id, None)
-                        await self.save_scheduled()
-                        
-                    if v_id not in self.active_lives:
-                        self.active_lives[v_id] = {
-                            'id': v_id,
-                            'url': f"https://www.youtube.com/watch?v={v_id}" if not is_twitch else base_url,
-                            'timestamp': time.time(),
-                            'channel_name': channel_name,
-                            'is_twitch': is_twitch
-                        }
-                        await self.save_active_lives()
+                # DECOUPLED LOGIC: State management must occur regardless of notification status.
+                if v_id in self.scheduled_streams:
+                    self.scheduled_streams.pop(v_id, None)
+                    await self.save_scheduled()
+                    
+                if v_id not in self.active_lives:
+                    self.active_lives[v_id] = {
+                        'id': v_id,
+                        'url': f"https://www.youtube.com/watch?v={v_id}" if not is_twitch else base_url,
+                        'timestamp': time.time(),
+                        'channel_name': channel_name,
+                        'is_twitch': is_twitch
+                    }
+                    await self.save_active_lives()
             
             else:
                 should_notify = False
@@ -566,7 +567,7 @@ class YTChannelMonitor:
                     v_id = stream['id']
                     logging.info(f"{queue_name} Scan (active_live): '{stream.get('channel_name')}'")
                     
-                    if time.time() > stream['timestamp'] + 10800:
+                    if time.time() > stream['timestamp'] + 3600:
                         self.active_lives.pop(v_id, None)
                         await self.save_active_lives()
                     else:
