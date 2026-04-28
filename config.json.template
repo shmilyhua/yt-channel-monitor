@@ -2,13 +2,17 @@
     "LOG_FILE": "monitor.log",
     "STATE_FILE": "seen_ids.json",
     "SCHEDULED_FILE": "scheduled.json",
+    "ACTIVE_LIVE_FILE": "active_lives.json",
     "MAX_HISTORY": 1000,
+    "MAX_CONCURRENT_SCANS": 3,
+
     "TELEGRAM_TOKEN": "YOUR_TELEGRAM_BOT_TOKEN",
     "TELEGRAM_CHAT_ID": "YOUR_TARGET_CHAT_ID",
     "TELEGRAM_ADMIN_ID": "YOUR_PERSONAL_USER_ID",
     "TWITCH_CLIENT_ID": "YOUR_TWITCH_CLIENT_ID",
     "TWITCH_CLIENT_SECRET": "YOUR_TWITCH_CLIENT_SECRET",
     "COOKIES_FILE": "/path/to/your/www.youtube.com_cookies.txt",
+    "FREE_CHAT_ID": "CHATROOM_ID",
     
     "LIVE_CHECK_INTERVAL": 65,
     "MAIN_SCAN_INTERVAL": 129,
