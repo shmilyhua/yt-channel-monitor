@@ -342,22 +342,23 @@ class YTChannelMonitor:
                     prefix = "SCHEDULED - PREMIERE" if allowed_tab == 'videos' else ("SCHEDULED - Collab" if keywords else f"SCHEDULED - {'Twitch' if is_twitch else 'Youtube'}")
                     await self.queue_notification(item, prefix, channel_name)
                     
-                    raw_sched = item.get('scheduled_timestamp') or item.get('release_timestamp')
-                    
-                    # If it lacks a timestamp, we rely on the rolling queue to catch it when it goes live.
-                    if raw_sched:
-                        if v_id not in self.scheduled_streams:
-                            self.scheduled_streams[v_id] = {
-                                'id': v_id,
-                                'url': item.get('webpage_url', f"https://www.youtube.com/watch?v={v_id}"),
-                                'timestamp': float(raw_sched),
-                                'channel_name': channel_name,
-                                'is_collab': bool(keywords),
-                                'is_twitch': is_twitch,
-                                'is_premiere': allowed_tab == 'videos',
-                                'added_at': time.time()
-                            }
-                            await self.save_scheduled()
+                # DECOUPLED LOGIC: 
+                # This must run every time an is_upcoming stream is detected, regardless of notification status.
+                raw_sched = item.get('scheduled_timestamp') or item.get('release_timestamp')
+                
+                if raw_sched:
+                    if v_id not in self.scheduled_streams:
+                        self.scheduled_streams[v_id] = {
+                            'id': v_id,
+                            'url': item.get('webpage_url', f"https://www.youtube.com/watch?v={v_id}"),
+                            'timestamp': float(raw_sched),
+                            'channel_name': channel_name,
+                            'is_collab': bool(keywords),
+                            'is_twitch': is_twitch,
+                            'is_premiere': allowed_tab == 'videos',
+                            'added_at': time.time()
+                        }
+                        await self.save_scheduled()
             
             elif live_status == 'is_live':
                 if is_twitch and '/videos/' in item.get('webpage_url', '').lower(): continue
