@@ -435,7 +435,7 @@ class YTChannelMonitor:
             await self.save_state()
 
     async def fast_block_worker(self, channels, interval):
-        STALE_SCHEDULE_THRESHOLD_SEC = 10800
+        STALE_SCHEDULE_THRESHOLD_SEC = 3600
         TARGETED_POLL_PRE_START_SEC = 300
         MAX_SCHEDULE_RETENTION_SEC = 86400 * 7 # Fallback retention: 7 days
         
