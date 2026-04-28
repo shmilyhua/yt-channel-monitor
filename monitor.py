@@ -429,9 +429,15 @@ class YTChannelMonitor:
                 if should_notify:
                     await self.queue_notification(item, prefix_label, channel_name)
                     
-                    if v_id in self.scheduled_streams:
-                        self.scheduled_streams.pop(v_id, None)
-                        await self.save_scheduled()
+                # DECOUPLED LOGIC: 
+                # If an item is definitively a VOD, Short, or Video, it cannot be scheduled or active.
+                if v_id in self.scheduled_streams:
+                    self.scheduled_streams.pop(v_id, None)
+                    await self.save_scheduled()
+                    
+                if v_id in self.active_lives:
+                    self.active_lives.pop(v_id, None)
+                    await self.save_active_lives()
 
         if state_modified:
             await self.save_state()
