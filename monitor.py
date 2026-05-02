@@ -583,7 +583,7 @@ class YTChannelMonitor:
                             if live_status == 'is_live':
                                 stream['timestamp'] = time.time()
                                 stream['failures'] = 0
-                            elif live_status == 'was_live' or (live_status is None and items[0].get('duration')):
+                            elif live_status in ['was_live', 'post_live'] or (live_status is None and items[0].get('duration')):
                                 needs_state_save = False
                                 should_notify_vod = False
                                 if f"{v_id}_vod" not in self.seen_ids:
