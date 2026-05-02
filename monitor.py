@@ -169,7 +169,7 @@ class YTChannelMonitor:
                         return False
         return True
 
-    async def get_twitch_stream_info(self, username):
+    async def get_twitch_stream_info(self, username, max_retries=4, retry_delay=15):
         now = time.time()
         if username in self.twitch_cache and now < self.twitch_cache[username][2]:
             return self.twitch_cache[username][0], self.twitch_cache[username][1]
@@ -177,17 +177,25 @@ class YTChannelMonitor:
         if await self.ensure_twitch_token():
             headers = {'Client-ID': self.twitch_client_id, 'Authorization': f"Bearer {self.twitch_access_token}"}
             stream_url = f"https://api.twitch.tv/helix/streams?user_login={username}"
-            try:
-                async with self.session.get(stream_url, headers=headers, timeout=10) as resp:
-                    resp.raise_for_status()
-                    data = (await resp.json()).get('data', [])
-                    if data: 
-                        game_name = data[0].get('game_name', "")
-                        title = data[0].get('title', "")
-                        self.twitch_cache[username] = (game_name, title, now + 300)
-                        return game_name, title
-            except Exception as e:
-                logging.error(f"Twitch API Error: {e}")
+            
+            for attempt in range(max_retries):
+                try:
+                    async with self.session.get(stream_url, headers=headers, timeout=10) as resp:
+                        resp.raise_for_status()
+                        data = (await resp.json()).get('data', [])
+                        if data: 
+                            game_name = data[0].get('game_name', "")
+                            title = data[0].get('title', "")
+                            self.twitch_cache[username] = (game_name, title, time.time() + 300)
+                            return game_name, title
+                except Exception as e:
+                    logging.error(f"Twitch API Error: {e}")
+                
+                # If data is empty, Twitch's Helix API cache is lagging behind the HLS stream.
+                if attempt < max_retries - 1:
+                    logging.info(f"Twitch API cache lag for {username}. Retrying in {retry_delay}s... ({attempt+1}/{max_retries})")
+                    await asyncio.sleep(retry_delay)
+                    
         return "", ""
 
     async def queue_notification(self, data, prefix, channel_name):
