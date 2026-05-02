@@ -618,21 +618,27 @@ class YTChannelMonitor:
     async def run(self):
         channels = self.config.get('CHANNELS', [])
         live_interval = self.config.get('LIVE_CHECK_INTERVAL', 60)
+        collab_live_interval = self.config.get('COLLAB_LIVE_INTERVAL', 65)
         main_interval = self.config.get('MAIN_SCAN_INTERVAL', 60)
         collab_interval = self.config.get('COLLAB_SCAN_INTERVAL', 60)
         
         yt_main = [c for c in channels if not c.get('keywords')]
         yt_collab = [c for c in channels if c.get('keywords')]
 
-        logging.info(f"Async Monitor active. Main Interval: {main_interval}s | Collab Interval: {collab_interval}s")
+        logging.info(f"Async Monitor active. Main Live: {live_interval}s | Collab Live: {collab_live_interval}s | Main VOD: {main_interval}s | Collab VOD: {collab_interval}s")
 
         async with aiohttp.ClientSession() as session:
             self.session = session
             tasks = [
                 asyncio.create_task(self.telegram_worker()),
+                # Tier 1 & 2: Fast Targeted Polls & Main Live
                 asyncio.create_task(self.fast_block_worker(channels, live_interval)),
+                # Tier 3: Main VODs
                 asyncio.create_task(self.rolling_queue_worker("Main", yt_main, ['streams', 'videos', 'shorts'], main_interval)),
-                asyncio.create_task(self.rolling_queue_worker("Collab", yt_collab, ['live', 'streams', 'videos', 'shorts'], collab_interval))
+                # Tier 4a: Collab Live (Independent Interval)
+                asyncio.create_task(self.rolling_queue_worker("Collab Live", yt_collab, ['live'], collab_live_interval)),
+                # Tier 4b: Collab VODs
+                asyncio.create_task(self.rolling_queue_worker("Collab VOD", yt_collab, ['streams', 'videos', 'shorts'], collab_interval))
             ]
             await asyncio.gather(*tasks)
 
