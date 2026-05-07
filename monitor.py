@@ -205,12 +205,14 @@ class YTChannelMonitor:
         
         url = data.get('webpage_url', f"https://www.youtube.com/watch?v={video_id}")    
         if 'twitch.tv' in url.lower():
-            match = re.search(r'twitch\.tv/([^/?]+)', url.lower())
-            if match:
-                username = match.group(1)
-                game_name, twitch_title = await self.get_twitch_stream_info(username)
-                if twitch_title: raw_title = twitch_title
-                if game_name: raw_title = f"{raw_title} — {game_name}"
+            # Only query the live API if the notification is for an active stream
+            if 'LIVE' in prefix:
+                match = re.search(r'twitch\.tv/([^/?]+)', url.lower())
+                if match:
+                    username = match.group(1)
+                    game_name, twitch_title = await self.get_twitch_stream_info(username)
+                    if twitch_title: raw_title = twitch_title
+                    if game_name: raw_title = f"{raw_title} — {game_name}"
 
         time_str = ""
         sched_ts = data.get('scheduled_timestamp') or data.get('release_timestamp')
