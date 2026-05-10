@@ -112,7 +112,7 @@ class YTChannelMonitor:
             try:
                 while retries < max_retries:
                     try:
-                        async with self.session.post(api_url, json=payload, timeout=15) as resp:
+                        async with self.session.post(api_url, json=payload, timeout=60) as resp:
                             if resp.status == 429:
                                 retry_after = int(resp.headers.get("Retry-After", 5))
                                 logging.warning(f"Telegram 429 Rate Limit. Sleeping {retry_after}s. (Attempt {retries+1}/{max_retries})")
