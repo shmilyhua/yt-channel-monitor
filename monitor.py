@@ -313,8 +313,14 @@ class YTChannelMonitor:
                     
         return items
 
-    def check_keywords(self, text, keywords):
+    def check_keywords(self, text, keywords, exclude_phrases=None):
         if not keywords: return True
+        
+        # 除外フレーズが指定されている場合、対象テキストからその文字列を削除する
+        if exclude_phrases:
+            for phrase in exclude_phrases:
+                text = text.replace(phrase, "")
+                
         text_lower = text.lower()
         return any(kw.lower() in text_lower for kw in keywords)
 
@@ -323,6 +329,7 @@ class YTChannelMonitor:
         channel_name = channel.get('name', 'Unknown Channel')
         base_url = channel.get('url')
         keywords = channel.get('keywords', [])
+        exclude_phrases = channel.get('exclude_phrases', [])
         is_twitch = 'twitch.tv' in base_url.lower()
         
         if is_twitch and allowed_tab == 'shorts': return
@@ -337,7 +344,9 @@ class YTChannelMonitor:
         for item in items:
             v_id = item.get('id')
             if not v_id or v_id == self.free_chat_id: continue
-            if not self.check_keywords(f"{item.get('title', '')} {item.get('description', '')}", keywords): continue
+            
+            combined_text = f"{item.get('title', '')} {item.get('description', '')}"
+            if not self.check_keywords(combined_text, keywords, exclude_phrases): continue
 
             live_status = item.get('live_status')
             
