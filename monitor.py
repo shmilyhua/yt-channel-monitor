@@ -414,7 +414,8 @@ class YTChannelMonitor:
                         'url': f"https://www.youtube.com/watch?v={v_id}" if not is_twitch else base_url,
                         'timestamp': time.time(),
                         'channel_name': channel_name,
-                        'is_twitch': is_twitch
+                        'is_twitch': is_twitch,
+                        'is_premiere': allowed_tab == 'videos'  # Add this line
                     }
                     await self.save_active_lives()
             
@@ -544,7 +545,8 @@ class YTChannelMonitor:
                                 'url': stream['url'],
                                 'timestamp': time.time(),
                                 'channel_name': stream['channel_name'],
-                                'is_twitch': stream.get('is_twitch', False)
+                                'is_twitch': stream.get('is_twitch', False),
+                                'is_premiere': stream.get('is_premiere', False)  # Add this line
                             }
                             await self.save_active_lives()
                                 
@@ -602,7 +604,7 @@ class YTChannelMonitor:
                             if live_status == 'is_live':
                                 stream['timestamp'] = time.time()
                                 stream['failures'] = 0
-                            elif live_status in ['was_live', 'post_live'] or (live_status is None and items[0].get('duration')):
+                            elif live_status in ['was_live', 'post_live', 'not_live'] or (live_status is None and items[0].get('duration')):
                                 needs_state_save = False
                                 should_notify_vod = False
                                 if f"{v_id}_vod" not in self.seen_ids:
@@ -611,7 +613,8 @@ class YTChannelMonitor:
                                     needs_state_save = True
                                     should_notify_vod = True
                                 if should_notify_vod:
-                                    await self.queue_notification(items[0], "VOD ARCHIVE", stream['channel_name'])
+                                    prefix = "VIDEO UPLOAD" if stream.get('is_premiere') else "VOD ARCHIVE"
+                                    await self.queue_notification(items[0], prefix, stream['channel_name'])
                                 if needs_state_save:
                                     await self.save_state()
                                     
