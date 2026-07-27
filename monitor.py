@@ -262,7 +262,13 @@ class YTChannelMonitor:
 
     async def fetch_latest_items(self, target_url, m_type=''):
         items_range = '1-3' if m_type == 'streams' else ('1' if m_type in ['live', 'targeted'] else '1-2')
-        cmd = ['yt-dlp', '-j', '--no-warnings', '--playlist-items', items_range, '--ignore-no-formats-error']
+        cmd = [
+            'yt-dlp', 
+            '--no-warnings', 
+            '--playlist-items', items_range, 
+            '--ignore-no-formats-error',
+            '--print', '%(.{id,title,description,live_status,duration,webpage_url,scheduled_timestamp,release_timestamp,timestamp,thumbnail})j'
+        ]
         
         if self.cookies_file and os.path.exists(self.cookies_file) and self.cookies_valid:
             cmd.extend(['--cookies', self.cookies_file])
