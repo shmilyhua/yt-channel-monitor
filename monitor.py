@@ -323,21 +323,25 @@ class YTChannelMonitor:
     def sanitize(s: str) -> str:
         if not s:
             return ""
+        # Strip directional Unicode marks
         s = s.replace("\u200e", "").replace("\u200f", "")
-        return re.sub(r"\s+", " ", s)
+        # Normalize all spaces/newlines to single spaces
+        return re.sub(r"\s+", " ", s).strip()
 
     def check_keywords(self, text, keywords, exclude_phrases=None):
         if not keywords:
             return True
-        
+
         text_clean = self.sanitize(text).lower()
 
         if exclude_phrases:
             for phrase in exclude_phrases:
                 phrase_clean = self.sanitize(phrase).lower()
                 if phrase_clean:
-                    text_clean = text_clean.replace(phrase_clean, "")
-                
+                    # Escape special regex characters and allow flexible whitespace matching
+                    pattern = re.sub(r"\s+", r"\\s*", re.escape(phrase_clean))
+                    text_clean = re.sub(pattern, "", text_clean)
+
         return any(kw.lower() in text_clean for kw in keywords)
 
     async def process_channel(self, channel, allowed_tab):
