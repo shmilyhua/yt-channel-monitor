@@ -5,6 +5,7 @@ import os
 import html
 import logging
 import re
+import unicodedata
 import copy
 import aiohttp
 from datetime import datetime
@@ -323,9 +324,9 @@ class YTChannelMonitor:
     def sanitize(s: str) -> str:
         if not s:
             return ""
-        # Strip directional Unicode marks
-        s = s.replace("\u200e", "").replace("\u200f", "")
-        # Normalize all spaces/newlines to single spaces
+        # 1. Strip ALL invisible Unicode formatting characters (U+202A, U+200E, U+200F, U+200B, etc.)
+        s = "".join(ch for ch in s if unicodedata.category(ch) != "Cf")
+        # 2. Normalize all whitespace/newlines into a single standard space
         return re.sub(r"\s+", " ", s).strip()
 
     def check_keywords(self, text, keywords, exclude_phrases=None):
