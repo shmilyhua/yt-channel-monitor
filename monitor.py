@@ -340,7 +340,7 @@ class YTChannelMonitor:
                 phrase_clean = self.sanitize(phrase).lower()
                 if phrase_clean:
                     # Escape special regex characters and allow flexible whitespace matching
-                    pattern = re.sub(r"\s+", r"\\s*", re.escape(phrase_clean))
+                    pattern = r"\s*".join(map(re.escape, phrase_clean.split()))
                     text_clean = re.sub(pattern, "", text_clean)
 
         return any(kw.lower() in text_clean for kw in keywords)
