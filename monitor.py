@@ -322,9 +322,13 @@ class YTChannelMonitor:
     def check_keywords(self, text, keywords, exclude_phrases=None):
         if not keywords: return True
         
+        # Strip Left-To-Right Mark (U+200E) and Right-To-Left Mark (U+200F)
+        text = text.replace("\u200e", "").replace("\u200f", "")
+
         # 除外フレーズが指定されている場合、対象テキストからその文字列を削除する
         if exclude_phrases:
             for phrase in exclude_phrases:
+                phrase_clean = phrase.replace("\u200e", "").replace("\u200f", "")
                 text = text.replace(phrase, "")
                 
         text_lower = text.lower()
