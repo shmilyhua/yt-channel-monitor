@@ -319,17 +319,26 @@ class YTChannelMonitor:
                     
         return items
 
+    def sanitize(s: str) -> str:
+        if not s:
+            return ""
+        # 1. Remove Left-To-Right (U+200E) and Right-To-Left (U+200F) marks
+        s = s.replace("\u200e", "").replace("\u200f", "")
+        # 2. Convert all space types (including U+00A0) and multi-spaces to a single standard space
+        return re.sub(r"\s+", " ", s)
+
     def check_keywords(self, text, keywords, exclude_phrases=None):
         if not keywords: return True
         
         # Strip Left-To-Right Mark (U+200E) and Right-To-Left Mark (U+200F)
-        text = text.replace("\u200e", "").replace("\u200f", "")
+        text_clean = sanitize(text)
 
         # 除外フレーズが指定されている場合、対象テキストからその文字列を削除する
         if exclude_phrases:
             for phrase in exclude_phrases:
-                phrase_clean = phrase.replace("\u200e", "").replace("\u200f", "")
-                text = text.replace(phrase, "")
+                phrase_clean = sanitize(phrase)
+                if phrase_clean:
+                    text_clean = text_clean.replace(phrase_clean, "")
                 
         text_lower = text.lower()
         return any(kw.lower() in text_lower for kw in keywords)
