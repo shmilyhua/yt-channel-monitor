@@ -387,7 +387,7 @@ class YTChannelMonitor:
                     new_ts = float(raw_sched)
                     if v_id in self.scheduled_streams:
                         # Validate if the scheduled time has shifted
-                        if self.scheduled_streams[v_id]['timestamp'] != new_ts:
+                        if abs(self.scheduled_streams[v_id]['timestamp'] - new_ts) > 60:
                             self.scheduled_streams[v_id]['timestamp'] = new_ts
                             time_changed = True
                             should_notify = True
