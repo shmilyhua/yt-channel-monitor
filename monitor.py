@@ -373,25 +373,30 @@ class YTChannelMonitor:
             
             if live_status == 'is_upcoming':
                 should_notify = False
+                time_changed = False
+                
                 if f"{v_id}_scheduled" not in self.seen_ids:
                     self._mark_seen(v_id, "_scheduled")
                     state_modified = True
                     should_notify = True
                         
-                if should_notify:
-                    prefix = "SCHEDULED - PREMIERE" if allowed_tab == 'videos' else ("SCHEDULED - Collab" if keywords else f"SCHEDULED - {'Twitch' if is_twitch else 'Youtube'}")
-                    await self.queue_notification(item, prefix, channel_name)
-                    
-                # DECOUPLED LOGIC: 
-                # This must run every time an is_upcoming stream is detected, regardless of notification status.
+                # Evaluate schedule timestamp before the notification queue
                 raw_sched = item.get('scheduled_timestamp') or item.get('release_timestamp')
                 
                 if raw_sched:
-                    if v_id not in self.scheduled_streams:
+                    new_ts = float(raw_sched)
+                    if v_id in self.scheduled_streams:
+                        # Validate if the scheduled time has shifted
+                        if self.scheduled_streams[v_id]['timestamp'] != new_ts:
+                            self.scheduled_streams[v_id]['timestamp'] = new_ts
+                            time_changed = True
+                            should_notify = True
+                            await self.save_scheduled()
+                    else:
                         self.scheduled_streams[v_id] = {
                             'id': v_id,
                             'url': item.get('webpage_url', f"https://www.youtube.com/watch?v={v_id}"),
-                            'timestamp': float(raw_sched),
+                            'timestamp': new_ts,
                             'channel_name': channel_name,
                             'is_collab': bool(keywords),
                             'is_twitch': is_twitch,
@@ -399,6 +404,13 @@ class YTChannelMonitor:
                             'added_at': time.time()
                         }
                         await self.save_scheduled()
+                        
+                if should_notify:
+                    base_prefix = "PREMIERE" if allowed_tab == 'videos' else ("Collab" if keywords else f"{'Twitch' if is_twitch else 'Youtube'}")
+                    action_prefix = "RESCHEDULED" if time_changed else "SCHEDULED"
+                    prefix = f"{action_prefix} - {base_prefix}"
+                    
+                    await self.queue_notification(item, prefix, channel_name)
             
             elif live_status == 'is_live':
                 if is_twitch and '/videos/' in item.get('webpage_url', '').lower(): continue
@@ -424,7 +436,6 @@ class YTChannelMonitor:
                     prefix = "PREMIERE - " + ("Collab" if keywords else "Youtube") if allowed_tab == 'videos' else ("LIVE - Collab" if keywords else f"LIVE - {'Twitch' if is_twitch else 'Youtube'}")
                     await self.queue_notification(rich_item, prefix, channel_name)
                     
-                # DECOUPLED LOGIC: State management must occur regardless of notification status.
                 if v_id in self.scheduled_streams:
                     self.scheduled_streams.pop(v_id, None)
                     await self.save_scheduled()
@@ -436,7 +447,7 @@ class YTChannelMonitor:
                         'timestamp': time.time(),
                         'channel_name': channel_name,
                         'is_twitch': is_twitch,
-                        'is_premiere': allowed_tab == 'videos'  # Add this line
+                        'is_premiere': allowed_tab == 'videos'
                     }
                     await self.save_active_lives()
             
@@ -470,8 +481,6 @@ class YTChannelMonitor:
                 if should_notify:
                     await self.queue_notification(item, prefix_label, channel_name)
                     
-                # DECOUPLED LOGIC: 
-                # If an item is definitively a VOD, Short, or Video, it cannot be scheduled or active.
                 if v_id in self.scheduled_streams:
                     self.scheduled_streams.pop(v_id, None)
                     await self.save_scheduled()
