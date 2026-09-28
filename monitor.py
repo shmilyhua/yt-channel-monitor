@@ -383,9 +383,12 @@ class YTChannelMonitor:
                 # Evaluate schedule timestamp before the notification queue
                 raw_sched = item.get('scheduled_timestamp') or item.get('release_timestamp')
                 
-                # Fallback to current time if the scheduled time has passed and yt-dlp omits it
+                # Prevent shifting timestamps and repeat notifications
                 if not raw_sched:
-                    raw_sched = time.time()
+                    if v_id in self.scheduled_streams:
+                        raw_sched = self.scheduled_streams[v_id]['timestamp']
+                    else:
+                        raw_sched = time.time()
                     item['scheduled_timestamp'] = raw_sched
                 
                 if raw_sched:
