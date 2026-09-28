@@ -503,16 +503,14 @@ class YTChannelMonitor:
     async def fast_block_worker(self, channels, interval):
         STALE_SCHEDULE_THRESHOLD_SEC = 3600
         TARGETED_POLL_PRE_START_SEC = 300
-        MAX_SCHEDULE_RETENTION_SEC = 86400 * 7 # Fallback retention: 7 days
+        MAX_SCHEDULE_RETENTION_SEC = 86400 * 7
         
         yt_main_live = [c for c in channels if not c.get('keywords') and 'live' in c.get('monitor', [])]
-        queue_idx = 0
         
         while True:
-            start_time = time.time()
+            current_time = time.time()
+            
             try:
-                current_time = time.time()
-                
                 stale_keys = [
                     k for k, s in self.scheduled_streams.items() 
                     if (current_time > s['timestamp'] + STALE_SCHEDULE_THRESHOLD_SEC) or 
@@ -532,73 +530,73 @@ class YTChannelMonitor:
                         dynamic_queue.append({'type': 'scheduled', 'data': s})
                             
                 if not dynamic_queue:
-                    elapsed = time.time() - start_time
-                    await asyncio.sleep(max(5.0, interval - elapsed))
+                    await asyncio.sleep(interval)
                     continue
                     
-                if queue_idx >= len(dynamic_queue):
-                    queue_idx = 0
-                    
-                current_item = dynamic_queue[queue_idx]
-                
-                if current_item['type'] == 'scheduled':
-                    stream = current_item['data']
-                    v_id = stream['id']
-                    logging.info(f"Fast Scan (scheduled): '{stream.get('channel_name')}'")
-                    
-                    items = await self.fetch_latest_items(stream['url'], m_type='targeted')
-                    if items and items[0].get('live_status') == 'is_live':
-                        needs_state_save = False
-                        should_notify_targeted = False
+                for current_item in dynamic_queue:
+                    start_time = time.time()
+                    try:
+                        if current_item['type'] == 'scheduled':
+                            stream = current_item['data']
+                            v_id = stream['id']
+                            logging.info(f"Fast Scan (scheduled): '{stream.get('channel_name')}'")
+                            
+                            items = await self.fetch_latest_items(stream['url'], m_type='targeted')
+                            if items and items[0].get('live_status') == 'is_live':
+                                needs_state_save = False
+                                should_notify_targeted = False
+                                
+                                if f"{v_id}_live" not in self.seen_ids:
+                                    self._mark_seen(v_id, "_live")
+                                    self.seen_ids.pop(f"{v_id}_scheduled", None)
+                                    needs_state_save = True
+                                    should_notify_targeted = True
+                                        
+                                if should_notify_targeted:
+                                    is_collab = stream.get('is_collab', False)
+                                    is_twitch = stream.get('is_twitch', False)
+                                    is_premiere = stream.get('is_premiere', False)
+                                    
+                                    if is_premiere:
+                                        prefix_label = "PREMIERE - Collab" if is_collab else "PREMIERE - Youtube"
+                                    elif is_collab:
+                                        prefix_label = "LIVE - Collab"
+                                    else:
+                                        prefix_label = f"LIVE - {'Twitch' if is_twitch else 'Youtube'}"
+                                        
+                                    await self.queue_notification(items[0], prefix_label, stream['channel_name'])
+                                        
+                                if needs_state_save:
+                                    await self.save_state()
+                                    
+                                self.scheduled_streams.pop(v_id, None)
+                                await self.save_scheduled()
+                                    
+                                if v_id not in self.active_lives:
+                                    self.active_lives[v_id] = {
+                                        'id': v_id,
+                                        'url': stream['url'],
+                                        'timestamp': time.time(),
+                                        'channel_name': stream['channel_name'],
+                                        'is_twitch': stream.get('is_twitch', False),
+                                        'is_premiere': stream.get('is_premiere', False)
+                                    }
+                                    await self.save_active_lives()
+                                        
+                        elif current_item['type'] == 'channel':
+                            target_channel = current_item['data']
+                            logging.info(f"Fast Scan (live): '{target_channel.get('name')}'")
+                            await self.process_channel(target_channel, 'live')
+
+                    except Exception as e:
+                        logging.error(f"Fast Block Item Error: {e}")
                         
-                        if f"{v_id}_live" not in self.seen_ids:
-                            self._mark_seen(v_id, "_live")
-                            self.seen_ids.pop(f"{v_id}_scheduled", None)
-                            needs_state_save = True
-                            should_notify_targeted = True
-                                
-                        if should_notify_targeted:
-                            is_collab = stream.get('is_collab', False)
-                            is_twitch = stream.get('is_twitch', False)
-                            is_premiere = stream.get('is_premiere', False)
-                            
-                            if is_premiere:
-                                prefix_label = "PREMIERE - Collab" if is_collab else "PREMIERE - Youtube"
-                            elif is_collab:
-                                prefix_label = "LIVE - Collab"
-                            else:
-                                prefix_label = f"LIVE - {'Twitch' if is_twitch else 'Youtube'}"
-                                
-                            await self.queue_notification(items[0], prefix_label, stream['channel_name'])
-                                
-                        if needs_state_save:
-                            await self.save_state()
-                            
-                        self.scheduled_streams.pop(v_id, None)
-                        await self.save_scheduled()
-                            
-                        if v_id not in self.active_lives:
-                            self.active_lives[v_id] = {
-                                'id': v_id,
-                                'url': stream['url'],
-                                'timestamp': time.time(),
-                                'channel_name': stream['channel_name'],
-                                'is_twitch': stream.get('is_twitch', False),
-                                'is_premiere': stream.get('is_premiere', False)  # Add this line
-                            }
-                            await self.save_active_lives()
-                                
-                elif current_item['type'] == 'channel':
-                    target_channel = current_item['data']
-                    logging.info(f"Fast Scan (live): '{target_channel.get('name')}'")
-                    await self.process_channel(target_channel, 'live')
+                    elapsed = time.time() - start_time
+                    await asyncio.sleep(max(5.0, interval - elapsed))
 
             except Exception as e:
-                logging.error(f"Fast Block Error: {e}")
-                
-            queue_idx += 1
-            elapsed = time.time() - start_time
-            await asyncio.sleep(max(5.0, interval - elapsed))
+                logging.error(f"Fast Block Cycle Error: {e}")
+                await asyncio.sleep(interval)
 
     async def rolling_queue_worker(self, queue_name, channels, tabs, interval):
         if not channels: return
@@ -612,68 +610,64 @@ class YTChannelMonitor:
                     
         if not static_queue: return
             
-        queue_idx = 0
         while True:
-            start_time = time.time()
-            try:
-                dynamic_queue = list(static_queue)
-                
-                if queue_name == "Main":
-                    for s in list(self.active_lives.values()):
-                        dynamic_queue.append({'type': 'active_live', 'data': s})
-                        
-                if queue_idx >= len(dynamic_queue):
-                    queue_idx = 0
-                    
-                current_item = dynamic_queue[queue_idx]
-                
-                if isinstance(current_item, dict) and current_item.get('type') == 'active_live':
-                    stream = current_item['data']
-                    v_id = stream['id']
-                    logging.info(f"{queue_name} Scan (active_live): '{stream.get('channel_name')}'")
-                    
-                    if time.time() > stream['timestamp'] + 3600:
-                        self.active_lives.pop(v_id, None)
-                        await self.save_active_lives()
-                    else:
-                        items = await self.fetch_latest_items(stream['url'], m_type='targeted')
-                        if items:
-                            live_status = items[0].get('live_status')
-                            if live_status == 'is_live':
-                                stream['timestamp'] = time.time()
-                                stream['failures'] = 0
-                            elif live_status in ['was_live', 'post_live', 'not_live'] or (live_status is None and items[0].get('duration')):
-                                needs_state_save = False
-                                should_notify_vod = False
-                                if f"{v_id}_vod" not in self.seen_ids:
-                                    self._mark_seen(v_id, "_vod")
-                                    self.seen_ids.pop(f"{v_id}_live", None)
-                                    needs_state_save = True
-                                    should_notify_vod = True
-                                if should_notify_vod:
-                                    prefix = "VIDEO UPLOAD" if stream.get('is_premiere') else "VOD ARCHIVE"
-                                    await self.queue_notification(items[0], prefix, stream['channel_name'])
-                                if needs_state_save:
-                                    await self.save_state()
-                                    
-                                self.active_lives.pop(v_id, None)
-                                await self.save_active_lives()
-                        else:
-                            stream['failures'] = stream.get('failures', 0) + 1
-                            if stream['failures'] >= 3:
-                                self.active_lives.pop(v_id, None)
-                                await self.save_active_lives()
-                else:
-                    target_channel, current_tab = current_item
-                    logging.info(f"{queue_name} Scan ({current_tab}): '{target_channel.get('name')}'")
-                    await self.process_channel(target_channel, current_tab)
-                    
-            except Exception as e:
-                logging.error(f"{queue_name} Worker Error: {e}")
+            dynamic_queue = list(static_queue)
             
-            queue_idx += 1
-            elapsed = time.time() - start_time
-            await asyncio.sleep(max(5.0, interval - elapsed))
+            if queue_name == "Main":
+                for s in list(self.active_lives.values()):
+                    dynamic_queue.append({'type': 'active_live', 'data': s})
+                    
+            # Iterate through the locked queue to prevent index shifting
+            for current_item in dynamic_queue:
+                start_time = time.time()
+                try:
+                    if isinstance(current_item, dict) and current_item.get('type') == 'active_live':
+                        stream = current_item['data']
+                        v_id = stream['id']
+                        logging.info(f"{queue_name} Scan (active_live): '{stream.get('channel_name')}'")
+                        
+                        if time.time() > stream['timestamp'] + 3600:
+                            self.active_lives.pop(v_id, None)
+                            await self.save_active_lives()
+                        else:
+                            items = await self.fetch_latest_items(stream['url'], m_type='targeted')
+                            if items:
+                                live_status = items[0].get('live_status')
+                                if live_status == 'is_live':
+                                    stream['timestamp'] = time.time()
+                                    stream['failures'] = 0
+                                elif live_status in ['was_live', 'post_live', 'not_live'] or (live_status is None and items[0].get('duration')):
+                                    needs_state_save = False
+                                    should_notify_vod = False
+                                    if f"{v_id}_vod" not in self.seen_ids:
+                                        self._mark_seen(v_id, "_vod")
+                                        self.seen_ids.pop(f"{v_id}_live", None)
+                                        needs_state_save = True
+                                        should_notify_vod = True
+                                    if should_notify_vod:
+                                        prefix = "VIDEO UPLOAD" if stream.get('is_premiere') else "VOD ARCHIVE"
+                                        await self.queue_notification(items[0], prefix, stream['channel_name'])
+                                    if needs_state_save:
+                                        await self.save_state()
+                                        
+                                    self.active_lives.pop(v_id, None)
+                                    await self.save_active_lives()
+                            else:
+                                stream['failures'] = stream.get('failures', 0) + 1
+                                if stream['failures'] >= 3:
+                                    self.active_lives.pop(v_id, None)
+                                    await self.save_active_lives()
+                    else:
+                        target_channel, current_tab = current_item
+                        logging.info(f"{queue_name} Scan ({current_tab}): '{target_channel.get('name')}'")
+                        await self.process_channel(target_channel, current_tab)
+                        
+                except Exception as e:
+                    logging.error(f"{queue_name} Worker Error: {e}")
+                
+                # Sleep applies per item, exactly as the original logic intended
+                elapsed = time.time() - start_time
+                await asyncio.sleep(max(5.0, interval - elapsed))
 
     async def run(self):
         channels = self.config.get('CHANNELS', [])
